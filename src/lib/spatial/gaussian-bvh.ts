@@ -63,10 +63,10 @@ class GaussianBVH {
     /** Root node of the BVH */
     root: GaussianBVHNode;
 
-    /** Position data from the original DataTable */
-    private x: TypedArray;
-    private y: TypedArray;
-    private z: TypedArray;
+    /** Position data from the original DataTable (gaussian centers) */
+    readonly x: TypedArray;
+    readonly y: TypedArray;
+    readonly z: TypedArray;
 
     /** Extent data */
     private extentX: TypedArray;
