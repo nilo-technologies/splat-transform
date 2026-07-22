@@ -360,4 +360,77 @@ describe('colorizeVertices density modes', () => {
             }
         });
     });
+
+    describe('size-coverage factor', () => {
+        // Reproduces the real-scene bug: a tiny, near-opaque "artifact" splat
+        // sits at *exactly* the same center as a large, correctly-colored,
+        // moderate-opacity splat. Because the Mahalanobis density term only
+        // depends on offset/sigma and both splats have offset 0, the raw
+        // density is 1.0 for both regardless of size -- so before the fix the
+        // higher-opacity tiny splat always wins, however small it is.
+        //
+        //   splat A "large/correct": center (0,0,0), sigma 1.0,   green,       opacity logit 0
+        //   splat B "tiny artifact": center (0,0,0), sigma 0.01,  near-black,  opacity logit 8
+        //
+        // Both offsets are 0 -> m^2 = 0 -> exp(-0.5 * m^2) = 1 for both.
+        //
+        // Size factor: sizeFactor(sigma) = min(1, sigma / voxelResolution) ** 2
+        //   sfA = min(1, 1.0 / 0.5) ** 2  = min(1, 2)    ** 2 = 1 ** 2      = 1
+        //   sfB = min(1, 0.01 / 0.5) ** 2 = min(1, 0.02) ** 2 = 0.02 ** 2   = 0.0004
+        //
+        // Weight w = sigmoid(logit) * exp(-0.5 * m^2) * sizeFactor:
+        //   wA (fixed) = sigmoid(0) * 1 * 1      = 0.5
+        //   wB (fixed) = sigmoid(8) * 1 * 0.0004 = 0.9996646498695336 * 0.0004
+        //              = 0.00039986585994781343
+        //   -> wA > wB, so the large correct splat now wins.
+        //
+        // Without the size factor (the pre-fix formula), the weights are:
+        //   wA (buggy) = sigmoid(0) = 0.5
+        //   wB (buggy) = sigmoid(8) = 0.9996646498695336
+        //   -> wB > wA, so the tiny artifact wins instead (the bug).
+        const colorA = [0.1, 0.8, 0.2];
+        const colorB = [0.02, 0.02, 0.02];
+        const sizeSplats = [
+            { center: [0, 0, 0], extent: [1, 1, 1], color: colorA, logit: 0, quat: identity, logScale: [0, 0, 0] },
+            { center: [0, 0, 0], extent: [0.05, 0.05, 0.05], color: colorB, logit: 8, quat: identity, logScale: [Math.log(0.01), Math.log(0.01), Math.log(0.01)] }
+        ];
+        const wA = 0.5;
+        const wB = 0.00039986585994781343;
+
+        it('dominant mode picks the large correct splat, not the tiny sub-voxel artifact', () => {
+            const { bvh, columns } = makeSplatFixture(sizeSplats);
+            const result = colorizeVertices(new Float32Array([0, 0, 0]), bvh, columns, voxelResolution, 'dominant');
+
+            // wA > wB with the size factor applied, so the output is splat A's
+            // green, not splat B's near-black.
+            assertClose(result[0], srgbToLinear(colorA[0]), 1e-4, 'red channel');
+            assertClose(result[1], srgbToLinear(colorA[1]), 1e-4, 'green channel');
+            assertClose(result[2], srgbToLinear(colorA[2]), 1e-4, 'blue channel');
+        });
+
+        it('gaussian mode weights the size-discounted candidates toward the large splat', () => {
+            const { bvh, columns } = makeSplatFixture(sizeSplats);
+            const result = colorizeVertices(new Float32Array([0, 0, 0]), bvh, columns, voxelResolution, 'gaussian');
+
+            const sumW = wA + wB;
+            const expected = colorA.map((c, i) => srgbToLinear((wA * c + wB * colorB[i]) / sumW));
+
+            assertClose(result[0], expected[0], 1e-4, 'red channel');
+            assertClose(result[1], expected[1], 1e-4, 'green channel');
+            assertClose(result[2], expected[2], 1e-4, 'blue channel');
+
+            // Sanity: without the size factor the weights are wA_old =
+            // sigmoid(0) = 0.5 and wB_old = sigmoid(8) = 0.9996646498695336,
+            // which pulls the blend heavily toward the tiny near-black
+            // artifact instead. Confirm the fixed result is nowhere near
+            // that buggy blend.
+            const wA_old = 0.5;
+            const wB_old = 0.9996646498695336;
+            const sumW_old = wA_old + wB_old;
+            const buggyBlend = colorA.map((c, i) => srgbToLinear((wA_old * c + wB_old * colorB[i]) / sumW_old));
+
+            assert(Math.abs(result[1] - buggyBlend[1]) > 0.3,
+                'the size-discounted green channel must differ substantially from the buggy (unweighted-by-size) blend');
+        });
+    });
 });

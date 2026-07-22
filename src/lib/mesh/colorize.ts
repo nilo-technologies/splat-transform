@@ -48,6 +48,12 @@ type SplatColorColumns = {
 
 const SH_C0 = 0.28209479177387814;
 
+// Power applied to the size-coverage factor in `gaussianWeightFactor` (see
+// below). Empirically chosen: squaring the linear ratio makes the discount
+// fall off quickly for splats well below the mesh's voxel resolution while
+// leaving splats at or above it (ratio >= 1, clamped) fully weighted.
+const SIZE_FACTOR_POWER = 2;
+
 const sigmoid = (v: number): number => 1 / (1 + Math.exp(-v));
 
 const srgbToLinear = (c: number): number => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
@@ -55,12 +61,23 @@ const srgbToLinear = (c: number): number => (c <= 0.04045 ? c / 12.92 : ((c + 0.
 const displayColor = (f_dc: TypedArray, idx: number): number => Math.min(Math.max(0.5 + SH_C0 * f_dc[idx], 0), 1);
 
 /**
- * Evaluate the unnormalized Gaussian density of a splat at a world-space point.
+ * Evaluate the weight factor of a splat at a world-space point, combining
+ * its Gaussian density with a size-coverage discount.
  *
- * The offset from the point to the splat center is rotated into the splat's
- * local frame (`u = R^T d`) and the Mahalanobis distance is computed with
- * per-axis variances `sigma_k^2 = exp(scale_k)^2`. Splats with a zero-length
- * quaternion have no orientation and contribute zero density.
+ * The density term rotates the offset from the point to the splat center
+ * into the splat's local frame (`u = R^T d`) and computes the Mahalanobis
+ * distance with per-axis variances `sigma_k^2 = exp(scale_k)^2`. This term
+ * alone peaks at exactly 1.0 at the splat's own center *regardless of the
+ * splat's size* -- real trained 3DGS scenes contain many tiny, near-opaque
+ * "cleanup" artifact splats clustered right at surfaces, and without a size
+ * discount such a splat can outscore the large splat that actually
+ * represents the true surface color, simply by being closer and more
+ * opaque. The size-coverage term counters this by discounting splats whose
+ * geometric-mean sigma is far smaller than the mesh's own `voxelResolution`,
+ * since such splats cannot meaningfully represent color at that resolution
+ * regardless of proximity or opacity. Splats with a zero-length quaternion
+ * have no orientation and contribute zero weight (unaffected by the size
+ * term, checked first).
  *
  * @param columns - Splat columns including `rot_*` and `scale_*`.
  * @param bvh - BVH holding the splat center positions.
@@ -68,15 +85,20 @@ const displayColor = (f_dc: TypedArray, idx: number): number => Math.min(Math.ma
  * @param px - Point x coordinate.
  * @param py - Point y coordinate.
  * @param pz - Point z coordinate.
- * @returns `exp(-0.5 * m^2)` where `m^2` is the squared Mahalanobis distance.
+ * @param voxelResolution - The mesh's voxel resolution, used as the size
+ * reference for the coverage discount.
+ * @returns `exp(-0.5 * m^2) * sizeFactor`, where `m^2` is the squared
+ * Mahalanobis distance and `sizeFactor = min(1, geoMeanSigma /
+ * voxelResolution) ** SIZE_FACTOR_POWER`.
  */
-const gaussianDensity = (
+const gaussianWeightFactor = (
     columns: SplatColorColumns,
     bvh: GaussianBVH,
     idx: number,
     px: number,
     py: number,
-    pz: number
+    pz: number,
+    voxelResolution: number
 ): number => {
     const { rot_0, rot_1, rot_2, rot_3, scale_0, scale_1, scale_2 } = columns;
 
@@ -117,7 +139,13 @@ const gaussianDensity = (
     const s2 = Math.exp(scale_2[idx]);
     const m2 = u0 * u0 / (s0 * s0) + u1 * u1 / (s1 * s1) + u2 * u2 / (s2 * s2);
 
-    return Math.exp(-0.5 * m2);
+    // discount splats much smaller than the mesh's own voxel resolution: a
+    // sub-voxel splat cannot meaningfully represent color at that
+    // resolution, however close/opaque it is
+    const geoMeanSigma = (s0 * s1 * s2) ** (1 / 3);
+    const sizeFactor = Math.min(1, geoMeanSigma / voxelResolution) ** SIZE_FACTOR_POWER;
+
+    return Math.exp(-0.5 * m2) * sizeFactor;
 };
 
 /**
@@ -209,10 +237,10 @@ const colorizeVertices = (
                 cg = sumG / sumW;
                 cb = sumB / sumW;
             } else {
-                // weight candidates by opacity x gaussian density at the vertex
+                // weight candidates by opacity x gaussian weight factor at the vertex
                 const weights = new Float64Array(indices.length);
                 for (let j = 0; j < indices.length; j++) {
-                    weights[j] = sigmoid(opacity[indices[j]]) * gaussianDensity(columns, bvh, indices[j], px, py, pz);
+                    weights[j] = sigmoid(opacity[indices[j]]) * gaussianWeightFactor(columns, bvh, indices[j], px, py, pz, voxelResolution);
                 }
 
                 if (mode === 'dominant') {
