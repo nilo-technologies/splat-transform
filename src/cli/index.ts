@@ -29,6 +29,7 @@ import {
     type FilterCluster,
     type Options as LibOptions,
     type CollisionMeshShape,
+    type CollisionColorMode,
     type ReadFileSystem,
     logger
 } from '../lib';
@@ -141,6 +142,7 @@ const cliOptionsConfig = {
     'voxel-carve': { type: 'string' },
     'seed-pos': { type: 'string', default: '' },
     'collision-mesh': { type: 'string', short: 'K' },
+    'collision-color': { type: 'string' },
     'projection': { type: 'string' },
     'camera': { type: 'string' },
     'look-at': { type: 'string' },
@@ -287,6 +289,13 @@ const parseArguments = async () => {
         throw new Error(`Invalid collision mesh shape: ${value}. Expected smooth, faces, voxel or tris.`);
     };
 
+    const parseCollisionColorMode = (value: string | undefined): CollisionColorMode | undefined => {
+        if (value === undefined) return undefined;
+        const normalized = value.toLowerCase();
+        if (normalized === 'average' || normalized === 'dominant' || normalized === 'topk' || normalized === 'gaussian') return normalized;
+        throw new Error(`Invalid collision color mode: ${value}. Expected average, dominant, topk or gaussian.`);
+    };
+
     const parseComparator = (value: string): 'lt' | 'lte' | 'gt' | 'gte' | 'eq' | 'neq' => {
         switch (value) {
             case 'lt': return 'lt';
@@ -387,6 +396,11 @@ const parseArguments = async () => {
     }
 
     const collisionMesh = parseCollisionMesh(v['collision-mesh']);
+    let collisionColorMode = parseCollisionColorMode(v['collision-color']);
+    if (collisionColorMode !== undefined && (collisionMesh === false || collisionMesh === 'faces' || collisionMesh === 'smooth')) {
+        logger.warn('--collision-color only applies to voxel/tris collision meshes and will be ignored.');
+        collisionColorMode = undefined;
+    }
     const spzVersion = parseInteger(v['spz-version']);
     if (spzVersion !== 3 && spzVersion !== 4) {
         throw new Error(`Invalid spz-version value: ${v['spz-version']}. Must be 3 or 4.`);
@@ -502,6 +516,7 @@ const parseArguments = async () => {
         navCapsule,
         navSeed,
         collisionMesh,
+        collisionColorMode,
         renderProjection,
         renderCameraPosition,
         renderLookAt,
@@ -798,6 +813,7 @@ VOXEL OUTPUT (.voxel.json)
         --voxel-carve [h,r]                 Carve navigable space using capsule flood fill from seed. Default: 1.6,0.2
         --seed-pos         <x,y,z>          Seed position for voxel processing and --filter-cluster. Default: 0,0,0
     -K, --collision-mesh   [smooth|faces|voxel|tris]   Generate collision mesh (.collision.glb). voxel/tris add per-vertex colors. Default shape: smooth
+        --collision-color    [average|dominant|topk|gaussian]   Vertex color algorithm for voxel/tris collision meshes. Default: average
 
 IMAGE OUTPUT (.webp) — lossless WebP rendered via GPU rasterizer
         --projection       <pinhole|equirect>  Camera projection. Default: pinhole.

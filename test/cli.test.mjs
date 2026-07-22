@@ -108,4 +108,64 @@ describe('CLI parsing', () => {
         assert.notStrictEqual(result.code, 0, 'CLI should reject --lod -2');
         assert.match(result.stderr, /Must be >= 0, or -1/);
     });
+
+    it('rejects an invalid --collision-color value', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-color',
+            'bogus',
+            'null'
+        ]);
+
+        assert.notStrictEqual(result.code, 0, 'CLI should reject --collision-color bogus');
+        assert.match(result.stderr, /Invalid collision color mode: bogus\. Expected average, dominant, topk or gaussian\./);
+    });
+
+    it('accepts --collision-color case-insensitively', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-color',
+            'DOMINANT',
+            '--collision-mesh',
+            'voxel',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+        assert.doesNotMatch(result.stderr, /collision-color/i);
+    });
+
+    it('warns and ignores --collision-color without a collision mesh', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-color',
+            'topk',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+        assert.match(result.stderr, /--collision-color.*ignored/i);
+    });
+
+    it('warns and ignores --collision-color with a grey collision mesh shape', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-mesh',
+            'faces',
+            '--collision-color',
+            'gaussian',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+        assert.match(result.stderr, /--collision-color.*ignored/i);
+    });
 });

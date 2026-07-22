@@ -9,6 +9,16 @@
 type CollisionMeshShape = 'smooth' | 'faces' | 'voxel' | 'tris';
 
 /**
+ * Vertex color algorithm for colored collision meshes (`voxel`/`tris` shapes).
+ *
+ * - `average` - opacity-weighted average of all touching splats (default, original behavior).
+ * - `dominant` - color of the single highest-weight splat (opacity × Gaussian density).
+ * - `topk` - renormalized weighted average of the top 3 splats by weight.
+ * - `gaussian` - weighted average with full opacity × Gaussian-density weights.
+ */
+type CollisionColorMode = 'average' | 'dominant' | 'topk' | 'gaussian';
+
+/**
  * Options for read/write operations.
  */
 type Options = {
@@ -56,6 +66,9 @@ type Options = {
 
     /** When set, a collision mesh (.collision.glb) is generated alongside the voxel output. `true` is equivalent to `smooth`. The `voxel` and `tris` shapes bake splat colors into a COLOR_0 vertex attribute. */
     collisionMesh?: boolean | CollisionMeshShape;
+
+    /** Vertex color algorithm for `voxel`/`tris` collision meshes. Ignored for grey shapes. Default: `'average'`. */
+    collisionColorMode?: CollisionColorMode;
 
     /** Camera projection for image output: `'pinhole'` (default) or `'equirect'` (360°×180° panorama). */
     renderProjection?: 'pinhole' | 'equirect';
@@ -163,4 +176,4 @@ type Param = {
  */
 type DeviceCreator = () => Promise<import('playcanvas').GraphicsDevice>;
 
-export type { CollisionMeshShape, Options, Param, DeviceCreator };
+export type { CollisionMeshShape, CollisionColorMode, Options, Param, DeviceCreator };
