@@ -56,7 +56,7 @@ type WriteVoxelOptions = {
     /** When `floorFill` is enabled, dilation radius in world units used to identify "interior" XZ columns to patch. Empty XZ areas larger than `2 * floorFillDilation` from any solid column are treated as exterior and left empty. Default: 0 (patch every empty column). */
     floorFillDilation?: number;
 
-    /** When set, a collision mesh (.collision.glb) is generated alongside the voxel output. `true` is equivalent to `smooth`. */
+    /** When set, a collision mesh (.collision.glb) is generated alongside the voxel output. `true` is equivalent to `smooth`. The `voxel` and `tris` shapes bake splat colors into a COLOR_0 vertex attribute. */
     collisionMesh?: boolean | CollisionMeshShape;
 };
 
@@ -291,7 +291,7 @@ const writeOctreeFiles = async (
  * and outputs two or three files:
  * - `filename` (.voxel.json) - JSON metadata including bounds, resolution, and array sizes
  * - Corresponding .voxel.bin - Binary octree data (nodes + leafData as Uint32 arrays)
- * - Corresponding .collision.glb - Triangle mesh extracted from the voxel output (GLB format, optional)
+ * - Corresponding .collision.glb - Triangle mesh extracted from the voxel output (GLB format, optional; the `voxel` and `tris` shapes include COLOR_0 vertex colors baked from the splats)
  *
  * The binary file layout is:
  * - Bytes 0 to (nodeCount * 4 - 1): nodes array (Uint32, little-endian)
@@ -337,9 +337,11 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
     const collisionMeshShape = (() => {
         if (collisionMesh === false || collisionMesh === undefined) return null;
         if (collisionMesh === true) return 'smooth';
-        if (collisionMesh === 'smooth' || collisionMesh === 'faces') return collisionMesh;
-        throw new Error(`Invalid collisionMesh value: ${String(collisionMesh)}. Expected true, false, "smooth", or "faces"`);
+        if (collisionMesh === 'smooth' || collisionMesh === 'faces' ||
+            collisionMesh === 'voxel' || collisionMesh === 'tris') return collisionMesh;
+        throw new Error(`Invalid collisionMesh value: ${String(collisionMesh)}. Expected true, false, "smooth", "faces", "voxel", or "tris"`);
     })();
+    const coloredCollisionMesh = collisionMeshShape === 'voxel' || collisionMeshShape === 'tris';
 
     if (navCapsule && !navSeed) {
         logger.warn('navCapsule requires navSeed for nav carving, skipping nav carving');
@@ -349,12 +351,14 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
     const hasFloorFill = floorFill;
 
     // Build a DataTable in engine space containing only the columns needed
-    // for voxelization (no SH, so SH rotation cost is never paid).
+    // for voxelization (no SH, so SH rotation cost is never paid). Colored
+    // collision meshes also need the SH DC color columns.
     const voxelColumns = [
         'x', 'y', 'z',
         'rot_0', 'rot_1', 'rot_2', 'rot_3',
         'scale_0', 'scale_1', 'scale_2',
-        'opacity'
+        'opacity',
+        ...(coloredCollisionMesh ? ['f_dc_0', 'f_dc_1', 'f_dc_2'] : [])
     ];
     const missingColumns = voxelColumns.filter(name => !dataTable.hasColumn(name));
     if (missingColumns.length > 0) {
@@ -416,8 +420,10 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         const buffer = await voxelizeToBuffer(
             bvh, gpuVoxelization, gridBounds, voxelResolution, opacityCutoff
         );
-        bvh = null;
-        pcDataTable = null;
+        if (!coloredCollisionMesh) {
+            bvh = null;
+            pcDataTable = null;
+        }
         extentsResult = null;
         cols = null;
 
@@ -499,9 +505,23 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         gpuDilation?.destroy();
         gpuDilation = null;
 
+        // Colored shapes need the retained BVH and splat color columns to
+        // bake COLOR_0 vertex attributes; release both afterwards.
+        const colorSource = coloredCollisionMesh ? {
+            bvh: bvh!,
+            columns: {
+                f_dc_0: pcDataTable!.getColumnByName('f_dc_0')!.data,
+                f_dc_1: pcDataTable!.getColumnByName('f_dc_1')!.data,
+                f_dc_2: pcDataTable!.getColumnByName('f_dc_2')!.data,
+                opacity: pcDataTable!.getColumnByName('opacity')!.data
+            }
+        } : null;
+
         const glbBytes = collisionMeshShape ?
-            buildCollisionMesh(grid, gridBounds, voxelResolution, collisionMeshShape) :
+            buildCollisionMesh(grid, gridBounds, voxelResolution, collisionMeshShape, colorSource) :
             null;
+        bvh = null;
+        pcDataTable = null;
 
         const octree = buildSparseOctree(
             grid,

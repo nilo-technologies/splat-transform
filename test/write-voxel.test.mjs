@@ -7,8 +7,9 @@ import assert from 'node:assert';
 
 import { Vec3 } from 'playcanvas';
 
+import { Column, DataTable } from '../src/lib/index.js';
 import { MemoryFileSystem } from '../src/lib/io/write/index.js';
-import { writeOctreeFiles } from '../src/lib/writers/write-voxel.js';
+import { writeOctreeFiles, writeVoxel } from '../src/lib/writers/write-voxel.js';
 
 describe('writeOctreeFiles', function () {
     it('writes metadata and little-endian nodes followed by leafData', async function () {
@@ -50,5 +51,55 @@ describe('writeOctreeFiles', function () {
             0x04, 0x03, 0x02, 0x01,
             0xCC, 0xDD, 0xEE, 0xFF
         ]);
+    });
+});
+
+describe('writeVoxel collisionMesh validation', function () {
+    // A dummy createDevice is enough: collisionMesh validation runs before
+    // the device is created, so it is never invoked.
+    const dummyCreateDevice = async () => ({});
+
+    const run = (collisionMesh) => writeVoxel({
+        filename: 'scene.voxel.json',
+        dataTable: new DataTable([new Column('x', new Float32Array(1))]),
+        createDevice: dummyCreateDevice,
+        collisionMesh
+    }, new MemoryFileSystem());
+
+    it('rejects invalid collisionMesh values listing all supported shapes', async function () {
+        await assert.rejects(
+            run('invalid'),
+            /^Error: Invalid collisionMesh value: invalid\. Expected true, false, "smooth", "faces", "voxel", or "tris"$/
+        );
+    });
+
+    it('accepts voxel and tris and requires color columns for them', async function () {
+        for (const shape of ['voxel', 'tris']) {
+            await assert.rejects(
+                run(shape),
+                (err) => {
+                    assert.match(err.message, /^writeVoxel: missing required column\(s\): /);
+                    assert.match(err.message, /f_dc_0/);
+                    assert.match(err.message, /f_dc_1/);
+                    assert.match(err.message, /f_dc_2/);
+                    return true;
+                },
+                `shape '${shape}' should require color columns`
+            );
+        }
+    });
+
+    it('does not require color columns for uncolored shapes', async function () {
+        for (const shape of ['smooth', 'faces']) {
+            await assert.rejects(
+                run(shape),
+                (err) => {
+                    assert.match(err.message, /^writeVoxel: missing required column\(s\): /);
+                    assert.doesNotMatch(err.message, /f_dc/);
+                    return true;
+                },
+                `shape '${shape}' should not require color columns`
+            );
+        }
     });
 });

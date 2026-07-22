@@ -54,7 +54,7 @@ type Options = {
     /** Seed position in world space for exterior fill and carve flood fill. */
     navSeed?: { x: number; y: number; z: number };
 
-    /** When set, a collision mesh (.collision.glb) is generated alongside the voxel output. `true` is equivalent to `smooth`. */
+    /** When set, a collision mesh (.collision.glb) is generated alongside the voxel output. `true` is equivalent to `smooth`. The `voxel` and `tris` shapes bake splat colors into a COLOR_0 vertex attribute. */
     collisionMesh?: boolean | CollisionMeshShape;
 
     /** Camera projection for image output: `'pinhole'` (default) or `'equirect'` (360°×180° panorama). */
