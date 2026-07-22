@@ -161,7 +161,8 @@ const gaussianWeightFactor = (
  * How overlapping splats combine is selected by `mode`:
  * - `average` (default): display colors weighted by `sigmoid(opacity)`.
  * - `gaussian`: display colors weighted by `sigmoid(opacity)` times the
- * Gaussian density of the splat at the vertex.
+ * Gaussian density of the splat at the vertex, discounted for splats whose
+ * size is well below the mesh's `voxelResolution`.
  * - `dominant`: the display color of the single highest-weight splat.
  * - `topk`: the weighted average of the top 3 splats by weight, renormalized.
  *
