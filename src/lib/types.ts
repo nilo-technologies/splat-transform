@@ -1,10 +1,12 @@
 /**
  * Collision mesh shape generated alongside voxel output.
  *
- * - `smooth` - marching cubes with lossless coplanar merge.
- * - `faces` - direct watertight voxel-boundary faces.
+ * - `smooth` - marching cubes with lossless coplanar merge (grey).
+ * - `faces` - direct watertight voxel-boundary faces (grey).
+ * - `voxel` - same geometry as `faces`, with per-vertex colors averaged from touching splats.
+ * - `tris` - same geometry as `smooth`, with per-vertex colors averaged from touching splats.
  */
-type CollisionMeshShape = 'smooth' | 'faces';
+type CollisionMeshShape = 'smooth' | 'faces' | 'voxel' | 'tris';
 
 /**
  * Options for read/write operations.

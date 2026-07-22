@@ -182,7 +182,7 @@ const stringOptionNames = new Set(Object.entries(cliOptionsConfig)
 );
 
 const isNumericValue = (s: string) => /^-?\d[\d.,e+-]*$/.test(s);
-const isCollisionMeshShape = (s: string) => /^(?:smooth|faces)$/i.test(s);
+const isCollisionMeshShape = (s: string) => /^(?:smooth|faces|voxel|tris)$/i.test(s);
 
 // Options that may appear without a value. The predicate gates whether the
 // next argv token is consumed as the value; when omitted (or rejected) the
@@ -283,8 +283,8 @@ const parseArguments = async () => {
         if (value === undefined) return false;
         if (value === '') return 'smooth';
         const normalized = value.toLowerCase();
-        if (normalized === 'smooth' || normalized === 'faces') return normalized;
-        throw new Error(`Invalid collision mesh shape: ${value}. Expected smooth or faces.`);
+        if (normalized === 'smooth' || normalized === 'faces' || normalized === 'voxel' || normalized === 'tris') return normalized;
+        throw new Error(`Invalid collision mesh shape: ${value}. Expected smooth, faces, voxel or tris.`);
     };
 
     const parseComparator = (value: string): 'lt' | 'lte' | 'gt' | 'gte' | 'eq' | 'neq' => {
@@ -797,7 +797,7 @@ VOXEL OUTPUT (.voxel.json)
         --voxel-floor-fill [size]           Fill columns upward from bottom (exterior scenes). Default: 1.6
         --voxel-carve [h,r]                 Carve navigable space using capsule flood fill from seed. Default: 1.6,0.2
         --seed-pos         <x,y,z>          Seed position for voxel processing and --filter-cluster. Default: 0,0,0
-    -K, --collision-mesh   [smooth|faces]   Generate collision mesh (.collision.glb). Default shape: smooth
+    -K, --collision-mesh   [smooth|faces|voxel|tris]   Generate collision mesh (.collision.glb). voxel/tris add per-vertex colors. Default shape: smooth
 
 IMAGE OUTPUT (.webp) — lossless WebP rendered via GPU rasterizer
         --projection       <pinhole|equirect>  Camera projection. Default: pinhole.
