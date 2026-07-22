@@ -3,6 +3,8 @@ import assert from 'node:assert';
 
 import { Vec3 } from 'playcanvas';
 
+import { Column, DataTable } from '../src/lib/index.js';
+import { GaussianBVH } from '../src/lib/spatial/index.js';
 import { BlockMaskBuffer } from '../src/lib/voxel/block-mask-buffer.js';
 import { SparseVoxelGrid } from '../src/lib/voxel/sparse-voxel-grid.js';
 import { marchingCubes } from '../src/lib/mesh/marching-cubes.js';
@@ -426,6 +428,161 @@ describe('buildCollisionMesh', () => {
         const bytes = buildCollisionMesh(toGrid(buffer, 4, 4, 4), bounds, 1.0, 'smooth');
 
         assert.strictEqual(bytes, null);
+    });
+});
+
+const SH_C0 = 0.28209479177387814;
+const packClr = c => (c - 0.5) / SH_C0;
+const srgbToLinear = c => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+
+// Build a colorSource containing a single splat at (x, y, z) with the given
+// AABB half-extent, display color and opacity logit.
+const makeSingleSplatColorSource = (x, y, z, extent, color, logit) => {
+    const dataTable = new DataTable([
+        new Column('x', new Float32Array([x])),
+        new Column('y', new Float32Array([y])),
+        new Column('z', new Float32Array([z])),
+        new Column('f_dc_0', new Float32Array([packClr(color[0])])),
+        new Column('f_dc_1', new Float32Array([packClr(color[1])])),
+        new Column('f_dc_2', new Float32Array([packClr(color[2])])),
+        new Column('opacity', new Float32Array([logit]))
+    ]);
+    const extents = new DataTable([
+        new Column('extent_x', new Float32Array([extent])),
+        new Column('extent_y', new Float32Array([extent])),
+        new Column('extent_z', new Float32Array([extent]))
+    ]);
+    return {
+        bvh: new GaussianBVH(dataTable, extents),
+        columns: {
+            f_dc_0: dataTable.getColumnByName('f_dc_0').data,
+            f_dc_1: dataTable.getColumnByName('f_dc_1').data,
+            f_dc_2: dataTable.getColumnByName('f_dc_2').data,
+            opacity: dataTable.getColumnByName('opacity').data
+        }
+    };
+};
+
+// Parse a GLB into its JSON chunk and BIN chunk bytes.
+const parseGlb = (bytes) => {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const jsonLength = view.getUint32(12, true);
+    const json = JSON.parse(new TextDecoder().decode(bytes.subarray(20, 20 + jsonLength)));
+    const bin = bytes.subarray(20 + jsonLength + 8);
+    return { json, bin };
+};
+
+const solidGrid = () => {
+    const buffer = new BlockMaskBuffer();
+    buffer.addBlock(linearBlockIdx(0, 0, 0, 1, 1), SOLID_LO, SOLID_HI);
+    return toGrid(buffer, 4, 4, 4);
+};
+
+describe('buildCollisionMesh vertex colors', () => {
+    it('should emit no COLOR_0 or materials for faces and smooth shapes', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        for (const shape of ['faces', 'smooth']) {
+            const bytes = buildCollisionMesh(solidGrid(), bounds, 1.0, shape);
+            assert.ok(bytes, `${shape} should produce GLB output`);
+
+            const { json } = parseGlb(bytes);
+            const primitive = json.meshes[0].primitives[0];
+            assert.ok(!('COLOR_0' in primitive.attributes),
+                `${shape} should not declare COLOR_0`);
+            assert.ok(!('material' in primitive),
+                `${shape} should not reference a material`);
+            assert.ok(!json.materials, `${shape} should not declare materials`);
+            assert.strictEqual(json.accessors.length, 2,
+                `${shape} should only have position and index accessors`);
+            assert.strictEqual(json.bufferViews.length, 2,
+                `${shape} should only have position and index bufferViews`);
+        }
+    });
+
+    it('should color voxel vertices with the overlapping splat color', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        const color = [0.8, 0.2, 0.5];
+        // splat at the grid centre with an AABB covering the whole 4x4x4 grid
+        const colorSource = makeSingleSplatColorSource(2, 2, 2, 4, color, 0);
+
+        const bytes = buildCollisionMesh(solidGrid(), bounds, 1.0, 'voxel', colorSource);
+        assert.ok(bytes, 'voxel should produce GLB output');
+
+        const { json, bin } = parseGlb(bytes);
+
+        const primitive = json.meshes[0].primitives[0];
+        assert.strictEqual(primitive.attributes.COLOR_0, 2);
+        assert.strictEqual(primitive.material, 0);
+        assert.deepStrictEqual(json.materials, [{
+            pbrMetallicRoughness: {
+                baseColorFactor: [1, 1, 1, 1],
+                metallicFactor: 0,
+                roughnessFactor: 1
+            },
+            doubleSided: true
+        }]);
+
+        const colorAccessor = json.accessors[2];
+        assert.strictEqual(colorAccessor.componentType, 5126, 'COLOR_0 must be FLOAT');
+        assert.strictEqual(colorAccessor.type, 'VEC3');
+        assert.strictEqual(colorAccessor.count, json.accessors[0].count,
+            'COLOR_0 count must match POSITION count');
+        assert.ok(!('min' in colorAccessor) && !('max' in colorAccessor),
+            'COLOR_0 accessor must not declare min/max');
+
+        const colorView = json.bufferViews[2];
+        assert.strictEqual(colorView.target, 34962, 'COLOR_0 must target ARRAY_BUFFER');
+        assert.strictEqual(colorView.byteOffset % 4, 0, 'COLOR_0 byteOffset must be 4-byte aligned');
+
+        // every vertex overlaps only the single synthetic splat, so every
+        // color must equal its linear-space display color
+        const colors = new Float32Array(
+            bin.buffer, bin.byteOffset + colorView.byteOffset, colorAccessor.count * 3);
+        const expected = color.map(srgbToLinear);
+        for (let i = 0; i < colorAccessor.count; i++) {
+            for (let c = 0; c < 3; c++) {
+                assert.ok(Math.abs(colors[i * 3 + c] - expected[c]) < 1e-4,
+                    `vertex ${i} channel ${c}: expected ${expected[c]}, got ${colors[i * 3 + c]}`);
+            }
+        }
+    });
+
+    it('should declare COLOR_0 with finite colors for the tris shape', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        const colorSource = makeSingleSplatColorSource(2, 2, 2, 4, [0.8, 0.2, 0.5], 0);
+
+        const bytes = buildCollisionMesh(solidGrid(), bounds, 1.0, 'tris', colorSource);
+        assert.ok(bytes, 'tris should produce GLB output');
+
+        const { json, bin } = parseGlb(bytes);
+
+        const primitive = json.meshes[0].primitives[0];
+        assert.strictEqual(primitive.attributes.COLOR_0, 2);
+        assert.strictEqual(primitive.material, 0);
+        assert.ok(json.materials?.[0]?.doubleSided, 'material must be doubleSided');
+
+        const colorAccessor = json.accessors[2];
+        assert.strictEqual(colorAccessor.componentType, 5126);
+        assert.strictEqual(colorAccessor.type, 'VEC3');
+        assert.strictEqual(colorAccessor.count, json.accessors[0].count,
+            'COLOR_0 count must match POSITION count');
+
+        const colorView = json.bufferViews[2];
+        const colors = new Float32Array(
+            bin.buffer, bin.byteOffset + colorView.byteOffset, colorAccessor.count * 3);
+        for (let i = 0; i < colors.length; i++) {
+            assert.ok(Number.isFinite(colors[i]), `color component ${i} must be finite`);
+            assert.ok(colors[i] >= 0 && colors[i] <= 1,
+                `color component ${i}=${colors[i]} out of [0, 1] range`);
+        }
+    });
+
+    it('should throw for voxel shape with a null colorSource', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        assert.throws(
+            () => buildCollisionMesh(solidGrid(), bounds, 1.0, 'voxel'),
+            /colorSource/
+        );
     });
 });
 
