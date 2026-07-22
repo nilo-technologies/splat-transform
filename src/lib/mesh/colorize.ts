@@ -198,6 +198,7 @@ const colorizeVertices = (
                 for (let j = 0; j < indices.length; j++) {
                     const idx = indices[j];
                     const w = sigmoid(opacity[idx]);
+                    // keep inline clamp verbatim - average mode must remain bit-identical to the original implementation
                     sumR += w * Math.min(Math.max(0.5 + SH_C0 * f_dc_0[idx], 0), 1);
                     sumG += w * Math.min(Math.max(0.5 + SH_C0 * f_dc_1[idx], 0), 1);
                     sumB += w * Math.min(Math.max(0.5 + SH_C0 * f_dc_2[idx], 0), 1);
