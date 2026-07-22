@@ -1,7 +1,7 @@
 import type { Bounds } from '../data-table';
 import { colorizeVertices, coplanarMerge, marchingCubes, voxelFaces, type Mesh, type SplatColorColumns } from '../mesh';
 import type { GaussianBVH } from '../spatial';
-import type { CollisionMeshShape } from '../types';
+import type { CollisionColorMode, CollisionMeshShape } from '../types';
 import { fmtCount, logger } from '../utils';
 import { SparseVoxelGrid } from '../voxel/sparse-voxel-grid';
 
@@ -198,8 +198,10 @@ function encodeGlb(positions: Float32Array, indices: Uint32Array, colors?: Float
  * the voxel-face mesh, `smooth` and `tris` use marching cubes with coplanar
  * merging. `voxel` and `tris` also bake splat colors into a COLOR_0 vertex
  * attribute.
- * @param colorSource - Splat BVH and color columns used to colorize mesh
- * vertices. Required for the `voxel` and `tris` shapes, ignored otherwise.
+ * @param colorSource - Splat BVH, color columns and coloring mode used to
+ * colorize mesh vertices. `columns` must include `rot_0..3` and `scale_0..2`
+ * when `mode` is not `'average'`. Required for the `voxel` and `tris` shapes,
+ * ignored otherwise.
  * @returns GLB bytes, or null if no triangles were generated
  * @throws Error if shape is `voxel` or `tris` and `colorSource` is null
  */
@@ -208,7 +210,7 @@ const buildCollisionMesh = (
     gridBounds: Bounds,
     voxelResolution: number,
     shape: CollisionMeshShape = 'smooth',
-    colorSource: { bvh: GaussianBVH; columns: SplatColorColumns } | null = null
+    colorSource: { bvh: GaussianBVH; columns: SplatColorColumns; mode: CollisionColorMode } | null = null
 ): Uint8Array | null => {
     const g = logger.group('Collision mesh');
 
@@ -255,7 +257,7 @@ const buildCollisionMesh = (
             throw new Error(`colorSource is required for collision mesh shape '${shape}'`);
         }
         const colorSub = logger.group('Coloring vertices');
-        colors = colorizeVertices(finalMesh.positions, colorSource.bvh, colorSource.columns, voxelResolution);
+        colors = colorizeVertices(finalMesh.positions, colorSource.bvh, colorSource.columns, voxelResolution, colorSource.mode);
         colorSub.end();
     }
 

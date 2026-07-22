@@ -7,7 +7,7 @@ import { Column, DataTable, computeGaussianExtents, computeWriteTransform, trans
 import { GpuDilation, GpuVoxelization } from '../gpu';
 import { type FileSystem, writeFile } from '../io/write';
 import { GaussianBVH } from '../spatial';
-import type { CollisionMeshShape, DeviceCreator } from '../types';
+import type { CollisionColorMode, CollisionMeshShape, DeviceCreator } from '../types';
 import { fmtCount, logger, Transform } from '../utils';
 import { version } from '../version';
 import { buildSparseOctree, type SparseOctree } from './sparse-octree';
@@ -58,6 +58,9 @@ type WriteVoxelOptions = {
 
     /** When set, a collision mesh (.collision.glb) is generated alongside the voxel output. `true` is equivalent to `smooth`. The `voxel` and `tris` shapes bake splat colors into a COLOR_0 vertex attribute. */
     collisionMesh?: boolean | CollisionMeshShape;
+
+    /** Vertex color algorithm for `voxel`/`tris` collision meshes. Ignored for grey shapes. Default: `'average'` */
+    collisionColorMode?: CollisionColorMode;
 };
 
 /**
@@ -327,7 +330,8 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         floorFillDilation = 0,
         navCapsule,
         navSeed,
-        collisionMesh = false
+        collisionMesh = false,
+        collisionColorMode = 'average'
     } = options;
 
     if (!createDevice) {
@@ -506,15 +510,25 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         gpuDilation = null;
 
         // Colored shapes need the retained BVH and splat color columns to
-        // bake COLOR_0 vertex attributes; release both afterwards.
+        // bake COLOR_0 vertex attributes; release both afterwards. The
+        // rot/scale columns are always present in pcDataTable (voxelization
+        // needs them) and are required by the non-average coloring modes.
         const colorSource = coloredCollisionMesh ? {
             bvh: bvh!,
             columns: {
                 f_dc_0: pcDataTable!.getColumnByName('f_dc_0')!.data,
                 f_dc_1: pcDataTable!.getColumnByName('f_dc_1')!.data,
                 f_dc_2: pcDataTable!.getColumnByName('f_dc_2')!.data,
-                opacity: pcDataTable!.getColumnByName('opacity')!.data
-            }
+                opacity: pcDataTable!.getColumnByName('opacity')!.data,
+                rot_0: pcDataTable!.getColumnByName('rot_0')!.data,
+                rot_1: pcDataTable!.getColumnByName('rot_1')!.data,
+                rot_2: pcDataTable!.getColumnByName('rot_2')!.data,
+                rot_3: pcDataTable!.getColumnByName('rot_3')!.data,
+                scale_0: pcDataTable!.getColumnByName('scale_0')!.data,
+                scale_1: pcDataTable!.getColumnByName('scale_1')!.data,
+                scale_2: pcDataTable!.getColumnByName('scale_2')!.data
+            },
+            mode: collisionColorMode
         } : null;
 
         const glbBytes = collisionMeshShape ?

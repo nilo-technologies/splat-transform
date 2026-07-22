@@ -459,8 +459,44 @@ const makeSingleSplatColorSource = (x, y, z, extent, color, logit) => {
             f_dc_1: dataTable.getColumnByName('f_dc_1').data,
             f_dc_2: dataTable.getColumnByName('f_dc_2').data,
             opacity: dataTable.getColumnByName('opacity').data
-        }
+        },
+        mode: 'average'
     };
+};
+
+// Build a colorSource from plain-object splats including rot/scale columns:
+// { center, extent, color, logit, quat: [w, x, y, z], logScale }. Used by the
+// density-based coloring modes (dominant / topk / gaussian).
+const makeSplatColorSource = (splats, mode) => {
+    const arr = f => new Float32Array(splats.map(f));
+    const dataTable = new DataTable([
+        new Column('x', arr(s => s.center[0])),
+        new Column('y', arr(s => s.center[1])),
+        new Column('z', arr(s => s.center[2])),
+        new Column('f_dc_0', arr(s => packClr(s.color[0]))),
+        new Column('f_dc_1', arr(s => packClr(s.color[1]))),
+        new Column('f_dc_2', arr(s => packClr(s.color[2]))),
+        new Column('opacity', arr(s => s.logit)),
+        new Column('rot_0', arr(s => s.quat[0])),
+        new Column('rot_1', arr(s => s.quat[1])),
+        new Column('rot_2', arr(s => s.quat[2])),
+        new Column('rot_3', arr(s => s.quat[3])),
+        new Column('scale_0', arr(s => s.logScale[0])),
+        new Column('scale_1', arr(s => s.logScale[1])),
+        new Column('scale_2', arr(s => s.logScale[2]))
+    ]);
+    const extents = new DataTable([
+        new Column('extent_x', arr(s => s.extent)),
+        new Column('extent_y', arr(s => s.extent)),
+        new Column('extent_z', arr(s => s.extent))
+    ]);
+    const names = ['f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity',
+        'rot_0', 'rot_1', 'rot_2', 'rot_3', 'scale_0', 'scale_1', 'scale_2'];
+    const columns = {};
+    for (const name of names) {
+        columns[name] = dataTable.getColumnByName(name).data;
+    }
+    return { bvh: new GaussianBVH(dataTable, extents), columns, mode };
 };
 
 // Parse a GLB into its JSON chunk and BIN chunk bytes.
@@ -583,6 +619,41 @@ describe('buildCollisionMesh vertex colors', () => {
             () => buildCollisionMesh(solidGrid(), bounds, 1.0, 'voxel'),
             /colorSource/
         );
+    });
+
+    it('should color dominant-mode vertices with the argmax-weight splat color', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        // Two splats at the grid centre, both AABBs covering the whole grid:
+        //   splat 0: red, logit 0, sigma 0.5  -> negligible density at the
+        //     corner vertices (m^2 = 48, w ~= 0.5 * exp(-24))
+        //   splat 1: blue, logit 2, sigma 100 -> density ~1 everywhere,
+        //     w ~= 0.881. Dominant mode must pick pure blue for every vertex
+        //     (average mode would blend to ~0.36 red / ~0.64 blue).
+        const identity = [1, 0, 0, 0];
+        const colorSource = makeSplatColorSource([
+            { center: [2, 2, 2], extent: 4, color: [1, 0, 0], logit: 0, quat: identity, logScale: [Math.log(0.5), Math.log(0.5), Math.log(0.5)] },
+            { center: [2, 2, 2], extent: 4, color: [0, 0, 1], logit: 2, quat: identity, logScale: [Math.log(100), Math.log(100), Math.log(100)] }
+        ], 'dominant');
+
+        const bytes = buildCollisionMesh(solidGrid(), bounds, 1.0, 'voxel', colorSource);
+        assert.ok(bytes, 'voxel should produce GLB output');
+
+        const { json, bin } = parseGlb(bytes);
+
+        const colorAccessor = json.accessors[2];
+        const colorView = json.bufferViews[2];
+        const colors = new Float32Array(
+            bin.buffer, bin.byteOffset + colorView.byteOffset, colorAccessor.count * 3);
+
+        // linear-space pure blue is exactly [0, 0, 1]
+        for (let i = 0; i < colorAccessor.count; i++) {
+            assert.ok(Math.abs(colors[i * 3 + 0] - 0) < 1e-4,
+                `vertex ${i} red: expected 0 (dominant splat only), got ${colors[i * 3 + 0]}`);
+            assert.ok(Math.abs(colors[i * 3 + 1] - 0) < 1e-4,
+                `vertex ${i} green: expected 0, got ${colors[i * 3 + 1]}`);
+            assert.ok(Math.abs(colors[i * 3 + 2] - 1) < 1e-4,
+                `vertex ${i} blue: expected 1, got ${colors[i * 3 + 2]}`);
+        }
     });
 });
 
