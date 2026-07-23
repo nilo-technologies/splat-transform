@@ -144,6 +144,7 @@ const cliOptionsConfig = {
     'collision-mesh': { type: 'string', short: 'K' },
     'collision-color': { type: 'string' },
     'collision-color-palette': { type: 'string' },
+    'collision-color-flat': { type: 'boolean', default: false },
     'projection': { type: 'string' },
     'camera': { type: 'string' },
     'look-at': { type: 'string' },
@@ -531,6 +532,7 @@ const parseArguments = async () => {
         collisionMesh,
         collisionColorMode,
         collisionColorPalette,
+        collisionColorFlat: v['collision-color-flat'],
         renderProjection,
         renderCameraPosition,
         renderLookAt,
@@ -829,6 +831,7 @@ VOXEL OUTPUT (.voxel.json)
     -K, --collision-mesh   [smooth|faces|voxel|tris]   Generate collision mesh (.collision.glb). voxel/tris add per-vertex colors. Default shape: smooth
         --collision-color    [average|solid]   Vertex color algorithm for voxel/tris collision meshes. solid snaps to the majority color instead of blending. Default: average
         --collision-color-palette   <n>   Quantize collision mesh vertex colors to an n-color palette. Default: off
+        --collision-color-flat          Average each triangle's vertex colors for a uniform per-face flat colour. Default: false
 
 IMAGE OUTPUT (.webp) — lossless WebP rendered via GPU rasterizer
         --projection       <pinhole|equirect>  Camera projection. Default: pinhole.

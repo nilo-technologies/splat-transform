@@ -75,6 +75,9 @@ type Options = {
     /** Quantize collision-mesh vertex colors to a k-means palette of this many colors. Off by default. Applies to `voxel`/`tris` collision meshes. */
     collisionColorPalette?: number;
 
+    /** When true, average each triangle's vertex colors and assign the result to all three vertices, giving faces a uniform flat color. Default: false. */
+    collisionColorFlat?: boolean;
+
     /** Camera projection for image output: `'pinhole'` (default) or `'equirect'` (360°×180° panorama). */
     renderProjection?: 'pinhole' | 'equirect';
 

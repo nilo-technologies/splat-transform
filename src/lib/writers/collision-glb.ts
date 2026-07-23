@@ -198,9 +198,10 @@ function encodeGlb(positions: Float32Array, indices: Uint32Array, colors?: Float
  * the voxel-face mesh, `smooth` and `tris` use marching cubes with coplanar
  * merging. `voxel` and `tris` also bake splat colors into a COLOR_0 vertex
  * attribute.
- * @param colorSource - Splat BVH, color columns, coloring mode, and optional
- * palette quantisation setting used to colorize mesh vertices. Required for
- * the `voxel` and `tris` shapes, ignored otherwise.
+ * @param colorSource - Splat BVH, color columns, coloring mode, optional
+ * palette quantisation, and optional flat-shade setting used to colorize
+ * mesh vertices. Required for the `voxel` and `tris` shapes, ignored
+ * otherwise.
  * @returns GLB bytes, or null if no triangles were generated
  * @throws Error if shape is `voxel` or `tris` and `colorSource` is null
  */
@@ -209,7 +210,7 @@ const buildCollisionMesh = (
     gridBounds: Bounds,
     voxelResolution: number,
     shape: CollisionMeshShape = 'smooth',
-    colorSource: { bvh: GaussianBVH; columns: SplatColorColumns; mode: CollisionColorMode; paletteK?: number } | null = null
+    colorSource: { bvh: GaussianBVH; columns: SplatColorColumns; mode: CollisionColorMode; paletteK?: number; flatShade?: boolean } | null = null
 ): Uint8Array | null => {
     const g = logger.group('Collision mesh');
 
@@ -262,6 +263,42 @@ const buildCollisionMesh = (
         if (colorSource.paletteK !== undefined && colorSource.paletteK >= 1) {
             colors = palettizeColors(colors, colorSource.paletteK);
             logger.info(`palette: ${colorSource.paletteK} colours`);
+        }
+
+        if (colorSource.flatShade) {
+            const numTris = finalMesh.indices.length / 3;
+            const flatPositions = new Float32Array(numTris * 9);
+            const flatIndices = new Uint32Array(numTris * 3);
+            const flatColors = new Float32Array(numTris * 9);
+
+            for (let t = 0; t < numTris; t++) {
+                const a = finalMesh.indices[t * 3];
+                const b = finalMesh.indices[t * 3 + 1];
+                const c = finalMesh.indices[t * 3 + 2];
+
+                // duplicate positions per triangle
+                for (let k = 0; k < 3; k++) {
+                    flatPositions[t * 9 + k] = finalMesh.positions[a * 3 + k];
+                    flatPositions[t * 9 + 3 + k] = finalMesh.positions[b * 3 + k];
+                    flatPositions[t * 9 + 6 + k] = finalMesh.positions[c * 3 + k];
+                }
+
+                // per-channel average as the face's uniform colour
+                for (let ch = 0; ch < 3; ch++) {
+                    const avg = (colors[a * 3 + ch] + colors[b * 3 + ch] + colors[c * 3 + ch]) / 3;
+                    flatColors[t * 9 + ch] = avg;
+                    flatColors[t * 9 + 3 + ch] = avg;
+                    flatColors[t * 9 + 6 + ch] = avg;
+                }
+
+                flatIndices[t * 3] = t * 3;
+                flatIndices[t * 3 + 1] = t * 3 + 1;
+                flatIndices[t * 3 + 2] = t * 3 + 2;
+            }
+
+            finalMesh = { positions: flatPositions, indices: flatIndices };
+            colors = flatColors;
+            logger.info('flat-shading: un-indexed, per-face colours');
         }
         colorSub.end();
     }

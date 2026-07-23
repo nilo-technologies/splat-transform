@@ -64,6 +64,9 @@ type WriteVoxelOptions = {
 
     /** Quantize collision-mesh vertex colors to a k-means palette of this many colors. Must be an integer >= 1. Default: off. */
     collisionColorPalette?: number;
+
+    /** When true, average each triangle's vertex colors for a uniform per-face flat colour. Default: false. */
+    collisionColorFlat?: boolean;
 };
 
 /**
@@ -335,7 +338,8 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         navSeed,
         collisionMesh = false,
         collisionColorMode = 'average',
-        collisionColorPalette
+        collisionColorPalette,
+        collisionColorFlat = false
     } = options;
 
     if (!createDevice) {
@@ -528,7 +532,8 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
                 opacity: pcDataTable!.getColumnByName('opacity')!.data
             },
             mode: collisionColorMode,
-            paletteK: collisionColorPalette
+            paletteK: collisionColorPalette,
+            flatShade: collisionColorFlat
         } : null;
 
         const glbBytes = collisionMeshShape ?

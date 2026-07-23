@@ -241,4 +241,18 @@ describe('CLI parsing', () => {
         assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
         assert.doesNotMatch(result.stderr, /palette/i);
     });
+
+    it('accepts --collision-color-flat with a coloured mesh', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-mesh',
+            'voxel',
+            '--collision-color-flat',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+    });
 });
