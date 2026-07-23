@@ -464,9 +464,8 @@ const makeSingleSplatColorSource = (x, y, z, extent, color, logit) => {
     };
 };
 
-// Build a colorSource from plain-object splats including rot/scale columns:
-// { center, extent, color, logit, quat: [w, x, y, z], logScale }. Used by the
-// density-based coloring modes (dominant / topk / gaussian).
+// Build a colorSource from plain-object splats:
+// { center, extent, color, logit }. Used by the coloring mode GLB tests.
 const makeSplatColorSource = (splats, mode) => {
     const arr = f => new Float32Array(splats.map(f));
     const dataTable = new DataTable([
@@ -476,24 +475,15 @@ const makeSplatColorSource = (splats, mode) => {
         new Column('f_dc_0', arr(s => packClr(s.color[0]))),
         new Column('f_dc_1', arr(s => packClr(s.color[1]))),
         new Column('f_dc_2', arr(s => packClr(s.color[2]))),
-        new Column('opacity', arr(s => s.logit)),
-        new Column('rot_0', arr(s => s.quat[0])),
-        new Column('rot_1', arr(s => s.quat[1])),
-        new Column('rot_2', arr(s => s.quat[2])),
-        new Column('rot_3', arr(s => s.quat[3])),
-        new Column('scale_0', arr(s => s.logScale[0])),
-        new Column('scale_1', arr(s => s.logScale[1])),
-        new Column('scale_2', arr(s => s.logScale[2]))
+        new Column('opacity', arr(s => s.logit))
     ]);
     const extents = new DataTable([
         new Column('extent_x', arr(s => s.extent)),
         new Column('extent_y', arr(s => s.extent)),
         new Column('extent_z', arr(s => s.extent))
     ]);
-    const names = ['f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity',
-        'rot_0', 'rot_1', 'rot_2', 'rot_3', 'scale_0', 'scale_1', 'scale_2'];
     const columns = {};
-    for (const name of names) {
+    for (const name of ['f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity']) {
         columns[name] = dataTable.getColumnByName(name).data;
     }
     return { bvh: new GaussianBVH(dataTable, extents), columns, mode };
@@ -621,19 +611,23 @@ describe('buildCollisionMesh vertex colors', () => {
         );
     });
 
-    it('should color dominant-mode vertices with the argmax-weight splat color', () => {
+    it('should color solid-mode vertices with the majority splat color', () => {
         const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
-        // Two splats at the grid centre, both AABBs covering the whole grid:
-        //   splat 0: red, logit 0, sigma 0.5  -> negligible density at the
-        //     corner vertices (m^2 = 48, w ~= 0.5 * exp(-24))
-        //   splat 1: blue, logit 2, sigma 100 -> density ~1 everywhere,
-        //     w ~= 0.881. Dominant mode must pick pure blue for every vertex
-        //     (average mode would blend to ~0.36 red / ~0.64 blue).
-        const identity = [1, 0, 0, 0];
+        // Two splats at the grid centre, both AABBs covering the whole grid.
+        // Their centers are ~3.46 from the corner vertices, beyond the 1.5x
+        // distance gate, so every vertex falls back to the ungated candidate
+        // set containing both splats. Opacity weights are 0.5 (red, logit 0)
+        // and sigmoid(2) ~= 0.881 (blue, logit 2).
+        //
+        // Red channel values 1 (w=0.5) and 0 (w=0.881): sorted ascending the
+        // first cumulant 0.881 >= half (0.6905), so the weighted median red
+        // is 0. Blue channel values 0 (w=0.5) and 1 (w=0.881): first cumulant
+        // 0.5 < half, so the median blue is 1. Solid mode must produce pure
+        // blue for every vertex (average mode would blend to ~0.36 red).
         const colorSource = makeSplatColorSource([
-            { center: [2, 2, 2], extent: 4, color: [1, 0, 0], logit: 0, quat: identity, logScale: [Math.log(0.5), Math.log(0.5), Math.log(0.5)] },
-            { center: [2, 2, 2], extent: 4, color: [0, 0, 1], logit: 2, quat: identity, logScale: [Math.log(100), Math.log(100), Math.log(100)] }
-        ], 'dominant');
+            { center: [2, 2, 2], extent: 4, color: [1, 0, 0], logit: 0 },
+            { center: [2, 2, 2], extent: 4, color: [0, 0, 1], logit: 2 }
+        ], 'solid');
 
         const bytes = buildCollisionMesh(solidGrid(), bounds, 1.0, 'voxel', colorSource);
         assert.ok(bytes, 'voxel should produce GLB output');
@@ -648,7 +642,7 @@ describe('buildCollisionMesh vertex colors', () => {
         // linear-space pure blue is exactly [0, 0, 1]
         for (let i = 0; i < colorAccessor.count; i++) {
             assert.ok(Math.abs(colors[i * 3 + 0] - 0) < 1e-4,
-                `vertex ${i} red: expected 0 (dominant splat only), got ${colors[i * 3 + 0]}`);
+                `vertex ${i} red: expected 0 (majority splat only), got ${colors[i * 3 + 0]}`);
             assert.ok(Math.abs(colors[i * 3 + 1] - 0) < 1e-4,
                 `vertex ${i} green: expected 0, got ${colors[i * 3 + 1]}`);
             assert.ok(Math.abs(colors[i * 3 + 2] - 1) < 1e-4,

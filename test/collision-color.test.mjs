@@ -2,7 +2,7 @@ import assert from 'node:assert';
 import { describe, it, before } from 'node:test';
 
 import { Column, DataTable } from '../src/lib/index.js';
-import { colorizeVertices } from '../src/lib/mesh/index.js';
+import { colorizeVertices, computeVertexNormals } from '../src/lib/mesh/index.js';
 import { GaussianBVH } from '../src/lib/spatial/index.js';
 
 import { assertClose } from './helpers/summary-compare.mjs';
@@ -16,6 +16,55 @@ const packOpacity = (opacity) => {
 };
 const sigmoid = v => 1 / (1 + Math.exp(-v));
 const srgbToLinear = c => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+
+// zero normals disable the inward filter, isolating distance-gate behavior
+const noNormals = count => new Float32Array(count);
+
+describe('computeVertexNormals', () => {
+    it('computes a unit normal for a single triangle', () => {
+        const positions = new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+        const indices = new Uint32Array([0, 1, 2]);
+        const normals = computeVertexNormals(positions, indices);
+
+        for (let v = 0; v < 3; v++) {
+            assertClose(normals[v * 3], 0, 1e-6, `vertex ${v} nx`);
+            assertClose(normals[v * 3 + 1], 0, 1e-6, `vertex ${v} ny`);
+            assertClose(normals[v * 3 + 2], 1, 1e-6, `vertex ${v} nz`);
+        }
+    });
+
+    it('area-weights normals across triangles sharing a vertex', () => {
+        // tri A (0,0,0),(2,0,0),(0,2,0) contributes cross (0,0,4)
+        // tri B (0,0,0),(0,2,0),(0,0,-2) contributes cross (-4,0,0)
+        // shared vertex 0 accumulates (-4,0,4) -> normalized (-sqrt(.5),0,sqrt(.5))
+        const positions = new Float32Array([
+            0, 0, 0,
+            2, 0, 0,
+            0, 2, 0,
+            0, 0, -2
+        ]);
+        const indices = new Uint32Array([0, 1, 2, 0, 2, 3]);
+        const normals = computeVertexNormals(positions, indices);
+
+        const s = Math.SQRT1_2;
+        assertClose(normals[0], -s, 1e-6, 'shared vertex nx');
+        assertClose(normals[1], 0, 1e-6, 'shared vertex ny');
+        assertClose(normals[2], s, 1e-6, 'shared vertex nz');
+        // vertex 1 only belongs to tri A -> pure (0,0,1)
+        assertClose(normals[3], 0, 1e-6, 'tri-A-only vertex nx');
+        assertClose(normals[5], 1, 1e-6, 'tri-A-only vertex nz');
+    });
+
+    it('leaves a zero normal for a degenerate zero-area triangle', () => {
+        const positions = new Float32Array([0, 0, 0, 1, 0, 0, 2, 0, 0]);
+        const indices = new Uint32Array([0, 1, 2]);
+        const normals = computeVertexNormals(positions, indices);
+
+        for (let i = 0; i < normals.length; i++) {
+            assert.strictEqual(normals[i], 0, `component ${i} must be zero`);
+        }
+    });
+});
 
 describe('colorizeVertices', () => {
     // Two splats:
@@ -58,24 +107,25 @@ describe('colorizeVertices', () => {
 
     it('returns one linear RGB triplet per vertex', () => {
         const positions = new Float32Array([0, 0, 0, 10, 10, 10]);
-        const result = colorizeVertices(positions, bvh, columns, voxelResolution);
+        const result = colorizeVertices(positions, noNormals(6), bvh, columns, voxelResolution);
         assert.strictEqual(result.length, positions.length);
     });
 
-    it('colors a vertex overlapping exactly one splat with that splat\'s color', () => {
-        // vertex box [-0.9, 0.1] on x: overlaps splat 0 ([-0.5, 0.5]) only
+    it('colors a vertex near exactly one splat with that splat\'s color', () => {
+        // vertex (-0.4,0,0): splat 0 center is 0.4 away (within the 0.75 gate),
+        // splat 1 center is 1.2 away (gated out)
         const positions = new Float32Array([-0.4, 0, 0]);
-        const result = colorizeVertices(positions, bvh, columns, voxelResolution);
+        const result = colorizeVertices(positions, noNormals(3), bvh, columns, voxelResolution);
 
         assertClose(result[0], srgbToLinear(color0[0]), 1e-4, 'red channel');
         assertClose(result[1], srgbToLinear(color0[1]), 1e-4, 'green channel');
         assertClose(result[2], srgbToLinear(color0[2]), 1e-4, 'blue channel');
     });
 
-    it('blends two overlapping splats weighted by sigmoid(opacity)', () => {
-        // vertex box [-0.1, 0.9] on x: overlaps both splat AABBs
+    it('blends two nearby splats weighted by sigmoid(opacity)', () => {
+        // vertex (0.4,0,0): both centers are 0.4 away, inside the gate
         const positions = new Float32Array([0.4, 0, 0]);
-        const result = colorizeVertices(positions, bvh, columns, voxelResolution);
+        const result = colorizeVertices(positions, noNormals(3), bvh, columns, voxelResolution);
 
         const w0 = sigmoid(logit0);
         const w1 = sigmoid(logit1);
@@ -86,9 +136,66 @@ describe('colorizeVertices', () => {
         assertClose(result[2], expected[2], 1e-4, 'blue channel');
     });
 
+    it('excludes a splat whose center is beyond the distance gate', () => {
+        // splat 1 moved to (1.5,0,0) with extent 2: its AABB still overlaps the
+        // query box, but its center is 1.1 from the vertex (> 0.75 gate)
+        const dataTable = new DataTable([
+            new Column('x', new Float32Array([0, 1.5])),
+            new Column('y', new Float32Array([0, 0])),
+            new Column('z', new Float32Array([0, 0])),
+            new Column('f_dc_0', new Float32Array([packClr(color0[0]), packClr(color1[0])])),
+            new Column('f_dc_1', new Float32Array([packClr(color0[1]), packClr(color1[1])])),
+            new Column('f_dc_2', new Float32Array([packClr(color0[2]), packClr(color1[2])])),
+            new Column('opacity', new Float32Array([logit0, logit1]))
+        ]);
+        const extents = new DataTable([
+            new Column('extent_x', new Float32Array([0.5, 2])),
+            new Column('extent_y', new Float32Array([0.5, 2])),
+            new Column('extent_z', new Float32Array([0.5, 2]))
+        ]);
+        const gatedBvh = new GaussianBVH(dataTable, extents);
+        const gatedColumns = {
+            f_dc_0: dataTable.getColumnByName('f_dc_0').data,
+            f_dc_1: dataTable.getColumnByName('f_dc_1').data,
+            f_dc_2: dataTable.getColumnByName('f_dc_2').data,
+            opacity: dataTable.getColumnByName('opacity').data
+        };
+
+        const positions = new Float32Array([0.4, 0, 0]);
+        const result = colorizeVertices(positions, noNormals(3), gatedBvh, gatedColumns, voxelResolution);
+
+        // ungated, splat 1's higher opacity would pull the blend toward color1;
+        // gated, only splat 0 remains
+        assertClose(result[0], srgbToLinear(color0[0]), 1e-4, 'red channel');
+        assertClose(result[1], srgbToLinear(color0[1]), 1e-4, 'green channel');
+        assertClose(result[2], srgbToLinear(color0[2]), 1e-4, 'blue channel');
+    });
+
+    it('falls back to all 2x-box candidates when none pass the distance gate', () => {
+        // vertex (2,0,0): 2x box [1,3] overlaps splat 1's AABB, but splat 1's
+        // center is 1.2 away (> 0.75 gate) -> falls back to the ungated set
+        const positions = new Float32Array([2, 0, 0]);
+        const result = colorizeVertices(positions, noNormals(3), bvh, columns, voxelResolution);
+
+        assertClose(result[0], srgbToLinear(color1[0]), 1e-4, 'red channel');
+        assertClose(result[1], srgbToLinear(color1[1]), 1e-4, 'green channel');
+        assertClose(result[2], srgbToLinear(color1[2]), 1e-4, 'blue channel');
+    });
+
+    it('falls back to a 4x query when the 2x box is empty', () => {
+        // vertex (3,0,0): 2x box [2,4] does not reach splat 1's AABB (max 1.3);
+        // the 4x box [1,5] does
+        const positions = new Float32Array([3, 0, 0]);
+        const result = colorizeVertices(positions, noNormals(3), bvh, columns, voxelResolution);
+
+        assertClose(result[0], srgbToLinear(color1[0]), 1e-4, 'red channel');
+        assertClose(result[1], srgbToLinear(color1[1]), 1e-4, 'green channel');
+        assertClose(result[2], srgbToLinear(color1[2]), 1e-4, 'blue channel');
+    });
+
     it('falls back to mid-grey when no splat is found at any radius', () => {
         const positions = new Float32Array([100, 0, 0]);
-        const result = colorizeVertices(positions, bvh, columns, voxelResolution);
+        const result = colorizeVertices(positions, noNormals(3), bvh, columns, voxelResolution);
 
         const grey = srgbToLinear(0.5);
         assertClose(grey, 0.21404114, 1e-6, 'linear grey sanity check');
@@ -97,42 +204,57 @@ describe('colorizeVertices', () => {
         assertClose(result[2], grey, 1e-4, 'blue channel');
     });
 
-    it('expands the query radius to find splats beyond the initial radius', () => {
-        // splat 1 AABB max x is 1.3; vertex box at 1x is [1.5, 2.5] (no overlap),
-        // at 2x is [1.0, 3.0] which overlaps splat 1 only
-        const positions = new Float32Array([2.0, 0, 0]);
-        const result = colorizeVertices(positions, bvh, columns, voxelResolution);
-
-        assertClose(result[0], srgbToLinear(color1[0]), 1e-4, 'red channel');
-        assertClose(result[1], srgbToLinear(color1[1]), 1e-4, 'green channel');
-        assertClose(result[2], srgbToLinear(color1[2]), 1e-4, 'blue channel');
-    });
-
-    it('produces bit-identical output for the average mode through the new signature', () => {
-        // exact Float32 values captured from the implementation before the mode
-        // parameter was added (vertex [0.4, 0, 0], two-splat blend above)
-        const expected = [
-            0.10256420075893402,
-            0.3755735456943512,
-            0.11435376107692719
-        ];
-
+    describe('inward filter', () => {
+        // vertex (0.4,0,0) between splat 0 (at 0) and splat 1 (at 0.8);
+        // inward margin is 0.5 * 0.5 = 0.25
         const positions = new Float32Array([0.4, 0, 0]);
 
-        // no mode arg (default) and explicit 'average' must both match exactly
-        for (const result of [
-            colorizeVertices(positions, bvh, columns, voxelResolution),
-            colorizeVertices(positions, bvh, columns, voxelResolution, 'average')
-        ]) {
-            assert.strictEqual(result[0], expected[0], 'red channel bits');
-            assert.strictEqual(result[1], expected[1], 'green channel bits');
-            assert.strictEqual(result[2], expected[2], 'blue channel bits');
-        }
+        it('excludes a splat on the outward side of the surface normal', () => {
+            // normal +x: splat 0 is behind (dot = -0.4 <= 0.25), splat 1 is
+            // outward (dot = +0.4 > 0.25) -> only splat 0 remains
+            const normals = new Float32Array([1, 0, 0]);
+            const result = colorizeVertices(positions, normals, bvh, columns, voxelResolution);
+
+            assertClose(result[0], srgbToLinear(color0[0]), 1e-4, 'red channel');
+            assertClose(result[1], srgbToLinear(color0[1]), 1e-4, 'green channel');
+            assertClose(result[2], srgbToLinear(color0[2]), 1e-4, 'blue channel');
+        });
+
+        it('mirrors the selection when the normal is flipped', () => {
+            // normal -x: splat 0 is outward, splat 1 is behind
+            const normals = new Float32Array([-1, 0, 0]);
+            const result = colorizeVertices(positions, normals, bvh, columns, voxelResolution);
+
+            assertClose(result[0], srgbToLinear(color1[0]), 1e-4, 'red channel');
+            assertClose(result[1], srgbToLinear(color1[1]), 1e-4, 'green channel');
+            assertClose(result[2], srgbToLinear(color1[2]), 1e-4, 'blue channel');
+        });
+
+        it('uses all gated splats when the vertex normal is zero', () => {
+            const result = colorizeVertices(positions, noNormals(3), bvh, columns, voxelResolution);
+
+            const w0 = sigmoid(logit0);
+            const w1 = sigmoid(logit1);
+            assertClose(result[0], srgbToLinear((w0 * color0[0] + w1 * color1[0]) / (w0 + w1)), 1e-4, 'red channel');
+        });
+
+        it('falls back to the distance-gated set when every gated splat is outward', () => {
+            // vertex (-0.4,0,0), normal +x: splat 0 (gated, dist 0.4) is outward
+            // (dot = +0.4 > 0.25), splat 1 is beyond the gate. Inward set is
+            // empty -> falls back to the gated set containing splat 0.
+            const positions2 = new Float32Array([-0.4, 0, 0]);
+            const normals = new Float32Array([1, 0, 0]);
+            const result = colorizeVertices(positions2, normals, bvh, columns, voxelResolution);
+
+            assertClose(result[0], srgbToLinear(color0[0]), 1e-4, 'red channel');
+            assertClose(result[1], srgbToLinear(color0[1]), 1e-4, 'green channel');
+            assertClose(result[2], srgbToLinear(color0[2]), 1e-4, 'blue channel');
+        });
     });
 });
 
-// build a BVH + full column set (including rot/scale) from plain-object splats:
-// { center, extent, color, logit, quat: [w, x, y, z], logScale }
+// build a BVH + color columns from plain-object splats:
+// { center, extent, color, logit }
 const makeSplatFixture = (splats) => {
     const arr = f => new Float32Array(splats.map(f));
     const dataTable = new DataTable([
@@ -142,295 +264,102 @@ const makeSplatFixture = (splats) => {
         new Column('f_dc_0', arr(s => packClr(s.color[0]))),
         new Column('f_dc_1', arr(s => packClr(s.color[1]))),
         new Column('f_dc_2', arr(s => packClr(s.color[2]))),
-        new Column('opacity', arr(s => s.logit)),
-        new Column('rot_0', arr(s => s.quat[0])),
-        new Column('rot_1', arr(s => s.quat[1])),
-        new Column('rot_2', arr(s => s.quat[2])),
-        new Column('rot_3', arr(s => s.quat[3])),
-        new Column('scale_0', arr(s => s.logScale[0])),
-        new Column('scale_1', arr(s => s.logScale[1])),
-        new Column('scale_2', arr(s => s.logScale[2]))
+        new Column('opacity', arr(s => s.logit))
     ]);
     const extents = new DataTable([
-        new Column('extent_x', arr(s => s.extent[0])),
-        new Column('extent_y', arr(s => s.extent[1])),
-        new Column('extent_z', arr(s => s.extent[2]))
+        new Column('extent_x', arr(s => s.extent)),
+        new Column('extent_y', arr(s => s.extent)),
+        new Column('extent_z', arr(s => s.extent))
     ]);
-    const names = ['f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity',
-        'rot_0', 'rot_1', 'rot_2', 'rot_3', 'scale_0', 'scale_1', 'scale_2'];
     const columns = {};
-    for (const name of names) {
+    for (const name of ['f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity']) {
         columns[name] = dataTable.getColumnByName(name).data;
     }
     return { bvh: new GaussianBVH(dataTable, extents), columns };
 };
 
-describe('colorizeVertices density modes', () => {
-    const identity = [1, 0, 0, 0];
+describe('colorizeVertices solid mode', () => {
     const voxelResolution = 0.5;
 
-    // Two splats, both overlapping a vertex at the origin:
-    //   splat 0 "fat/far":  center (3, 0, 0), sigma 2, red, opacity logit 4
-    //   splat 1 "tight/near": center (0.25, 0, 0), sigma 0.5, blue, opacity logit 0
-    // Identity rotations, so u = d and m^2 = (d / sigma)^2.
-    // Hand-computed weights w = sigmoid(logit) * exp(-0.5 * m^2):
-    //   w0 = sigmoid(4) * exp(-0.5 * (3/2)^2)   = 0.98201379 * exp(-1.125)
-    //   w1 = sigmoid(0) * exp(-0.5 * (0.5)^2)   = 0.5        * exp(-0.125)
-    const nearFarSplats = [
-        { center: [3, 0, 0], extent: [3, 0.5, 0.5], color: [1, 0, 0], logit: 4, quat: identity, logScale: [Math.log(2), Math.log(2), Math.log(2)] },
-        { center: [0.25, 0, 0], extent: [0.5, 0.5, 0.5], color: [0, 0, 1], logit: 0, quat: identity, logScale: [Math.log(0.5), Math.log(0.5), Math.log(0.5)] }
+    // Three splats along +x near the vertex at (0.2,0,0), all within the 0.75
+    // gate (distances 0.2, 0, 0.2), extents 0.5 so their AABBs overlap the
+    // 2x query box. Zero normals disable the inward filter.
+    //
+    //   splat 0: red   (0.9, 0.1, 0.2), logit 0 -> w0 = 0.5
+    //   splat 1: green (0.1, 0.9, 0.3), logit 2 -> w1 = sigmoid(2)
+    //   splat 2: blue  (0.5, 0.3, 0.8), logit 1 -> w2 = sigmoid(1)
+    const splats = [
+        { center: [0, 0, 0], extent: 0.5, color: [0.9, 0.1, 0.2], logit: 0 },
+        { center: [0.2, 0, 0], extent: 0.5, color: [0.1, 0.9, 0.3], logit: 2 },
+        { center: [0.4, 0, 0], extent: 0.5, color: [0.5, 0.3, 0.8], logit: 1 }
     ];
-    const wFar = 0.31881319991573137;
-    const wNear = 0.44124845129229773;
+    const positions = new Float32Array([0.2, 0, 0]);
 
-    describe('gaussian mode', () => {
-        it('weights candidates by sigmoid(opacity) * exp(-0.5 * m^2)', () => {
-            const { bvh, columns } = makeSplatFixture(nearFarSplats);
-            const result = colorizeVertices(new Float32Array([0, 0, 0]), bvh, columns, voxelResolution, 'gaussian');
+    it('picks the per-channel opacity-weighted median, not the mean', () => {
+        const { bvh, columns } = makeSplatFixture(splats);
+        const result = colorizeVertices(positions, noNormals(3), bvh, columns, voxelResolution, 'solid');
 
-            const sumW = wFar + wNear;
-            const expected = [
-                srgbToLinear(wFar / sumW),          // red from splat 0 only
-                srgbToLinear(0),                    // neither splat has green
-                srgbToLinear(wNear / sumW)          // blue from splat 1 only
-            ];
+        const w0 = sigmoid(0);
+        const w1 = sigmoid(2);
+        const w2 = sigmoid(1);
+        const total = w0 + w1 + w2;
+        const half = total / 2;
 
-            assertClose(result[0], expected[0], 1e-4, 'red channel');
-            assertClose(result[1], expected[1], 1e-4, 'green channel');
-            assertClose(result[2], expected[2], 1e-4, 'blue channel');
-        });
+        // hand-computed per channel (sort values ascending, accumulate weights,
+        // take the first value reaching >= half the total):
+        //   red values:   0.1 (w1), 0.5 (w2), 0.9 (w0)
+        //     cum: w1 = 0.881 < half = 1.056; w1+w2 = 1.612 >= half -> 0.5
+        //   green values: 0.1 (w0), 0.3 (w2), 0.9 (w1)
+        //     cum: w0 = 0.5 < half; w0+w2 = 1.231 >= half -> 0.3
+        //   blue values:  0.2 (w0), 0.3 (w1), 0.8 (w2)
+        //     cum: w0 = 0.5 < half; w0+w1 = 1.381 >= half -> 0.3
+        assert(half > w1 - 1e-9, 'test arithmetic sanity: half exceeds first cumulant for red');
 
-        it('lets a tight near splat win over a fatter far splat with higher opacity', () => {
-            const { bvh, columns } = makeSplatFixture(nearFarSplats);
-            const positions = new Float32Array([0, 0, 0]);
+        assertClose(result[0], srgbToLinear(0.5), 1e-4, 'red channel median');
+        assertClose(result[1], srgbToLinear(0.3), 1e-4, 'green channel median');
+        assertClose(result[2], srgbToLinear(0.3), 1e-4, 'blue channel median');
 
-            // plain average: sigmoid(4) > sigmoid(0), so red dominates
-            const average = colorizeVertices(positions, bvh, columns, voxelResolution);
-            assert(average[0] > average[2], 'average mode should favor the high-opacity red splat');
-
-            // gaussian: wNear > wFar, so blue dominates
-            const gaussian = colorizeVertices(positions, bvh, columns, voxelResolution, 'gaussian');
-            assert(gaussian[2] > gaussian[0], 'gaussian mode should favor the tight near blue splat');
-        });
-
-        it('rotates the offset into the splat frame (u = R^T d)', () => {
-            // Two splats at the same center with the same anisotropic scales,
-            // differing only in rotation. Splat B is rotated 90 degrees about z,
-            // so the world-x offset falls along its long (sigma = 2) axis:
-            //   splat A (identity): m^2 = 0.9^2 / 0.5^2 = 3.24   -> w = 0.5 * exp(-1.62)
-            //   splat B (rot 90 z): m^2 = 0.9^2 / 2^2   = 0.2025 -> w = 0.5 * exp(-0.10125)
-            const halfSqrt2 = Math.SQRT1_2;
-            const splats = [
-                { center: [0.9, 0, 0], extent: [0.5, 0.5, 0.5], color: [1, 0, 0], logit: 0, quat: identity, logScale: [Math.log(0.5), Math.log(2), 0] },
-                { center: [0.9, 0, 0], extent: [0.5, 0.5, 0.5], color: [0, 1, 0], logit: 0, quat: [halfSqrt2, 0, 0, halfSqrt2], logScale: [Math.log(0.5), Math.log(2), 0] }
-            ];
-            const wA = 0.098949349541807327;
-            const wB = 0.45185353893659802;
-
-            const { bvh, columns } = makeSplatFixture(splats);
-            const positions = new Float32Array([0, 0, 0]);
-
-            const gaussian = colorizeVertices(positions, bvh, columns, voxelResolution, 'gaussian');
-            const sumW = wA + wB;
-            assertClose(gaussian[0], srgbToLinear(wA / sumW), 1e-4, 'red channel');
-            assertClose(gaussian[1], srgbToLinear(wB / sumW), 1e-4, 'green channel');
-            assertClose(gaussian[2], srgbToLinear(0), 1e-4, 'blue channel');
-
-            // the rotated splat has the higher density, so dominant picks green
-            const dominant = colorizeVertices(positions, bvh, columns, voxelResolution, 'dominant');
-            assertClose(dominant[0], srgbToLinear(0), 1e-4, 'red channel');
-            assertClose(dominant[1], srgbToLinear(1), 1e-4, 'green channel');
-            assertClose(dominant[2], srgbToLinear(0), 1e-4, 'blue channel');
-        });
+        // the weighted mean differs clearly on the red channel:
+        // (0.9*w0 + 0.1*w1 + 0.5*w2) / total ~= 0.4278
+        const meanR = (0.9 * w0 + 0.1 * w1 + 0.5 * w2) / total;
+        assert(Math.abs(meanR - 0.5) > 0.05, 'mean and median must diverge on red channel');
     });
 
-    describe('dominant mode', () => {
-        it('returns the argmax-weight splat color, not a blend', () => {
-            const { bvh, columns } = makeSplatFixture(nearFarSplats);
-            const result = colorizeVertices(new Float32Array([0, 0, 0]), bvh, columns, voxelResolution, 'dominant');
-
-            // wNear > wFar, so the output is exactly splat 1's blue
-            assertClose(result[0], srgbToLinear(0), 1e-4, 'red channel');
-            assertClose(result[1], srgbToLinear(0), 1e-4, 'green channel');
-            assertClose(result[2], srgbToLinear(1), 1e-4, 'blue channel');
-
-            // a blend would contain a red component (wFar / (wFar + wNear) > 0.4)
-            assertClose(result[0], 0, 1e-4, 'red channel carries no blend');
-        });
-    });
-
-    describe('topk mode', () => {
-        // Four splats along +x, identity rotation, sigma 1, logits 0..3,
-        // colors red, green, blue, white. Hand-computed weights
-        // w = sigmoid(logit) * exp(-0.5 * d^2):
-        const topkSplats = [
-            { center: [0.1, 0, 0], extent: [0.5, 0.5, 0.5], color: [1, 0, 0], logit: 0, quat: identity, logScale: [0, 0, 0] },
-            { center: [0.2, 0, 0], extent: [0.5, 0.5, 0.5], color: [0, 1, 0], logit: 1, quat: identity, logScale: [0, 0, 0] },
-            { center: [0.3, 0, 0], extent: [0.5, 0.5, 0.5], color: [0, 0, 1], logit: 2, quat: identity, logScale: [0, 0, 0] },
-            { center: [0.4, 0, 0], extent: [0.5, 0.5, 0.5], color: [1, 1, 1], logit: 3, quat: identity, logScale: [0, 0, 0] }
+    it('uses the higher-value candidate when its weight passes half the total', () => {
+        // Two candidates, unequal opacities. Red channel values 0.2 (logit 0,
+        // w = 0.5) and 0.8 (logit 2, w = 0.881): sorted ascending, the first
+        // cumulant 0.5 < half = 0.6905, so the median is the SECOND value 0.8
+        // even though sorting starts at 0.2.
+        const twoSplats = [
+            { center: [0, 0, 0], extent: 0.5, color: [0.2, 0.5, 0.5], logit: 0 },
+            { center: [0.2, 0, 0], extent: 0.5, color: [0.8, 0.5, 0.5], logit: 2 }
         ];
-        const w0 = 0.49750623959634116;
-        const w1 = 0.71658264888265299;
-        const w2 = 0.84203978855280803;
-        const w3 = 0.87933674761476455;
+        const { bvh, columns } = makeSplatFixture(twoSplats);
+        const result = colorizeVertices(new Float32Array([0.1, 0, 0]), noNormals(3), bvh, columns, voxelResolution, 'solid');
 
-        it('averages only the top 3 candidates by weight, renormalized', () => {
-            const { bvh, columns } = makeSplatFixture(topkSplats);
-            const result = colorizeVertices(new Float32Array([0, 0, 0]), bvh, columns, voxelResolution, 'topk');
-
-            // w3 > w2 > w1 > w0, so splat 0 (red) is dropped
-            const sumW = w1 + w2 + w3;
-            const expected = [
-                srgbToLinear(w3 / sumW),                  // red from the white splat only
-                srgbToLinear((w1 + w3) / sumW),           // green splat + white splat
-                srgbToLinear((w2 + w3) / sumW)            // blue splat + white splat
-            ];
-
-            assertClose(result[0], expected[0], 1e-4, 'red channel');
-            assertClose(result[1], expected[1], 1e-4, 'green channel');
-            assertClose(result[2], expected[2], 1e-4, 'blue channel');
-
-            // sanity: including all 4 weights would noticeably change the red channel
-            const allRed = srgbToLinear((w0 + w3) / (w0 + w1 + w2 + w3));
-            assert(Math.abs(result[0] - allRed) > 1e-2, 'top-3 result must differ from full weighted average');
-        });
-
-        it('uses all candidates when fewer than 3 overlap', () => {
-            const { bvh, columns } = makeSplatFixture(nearFarSplats);
-            const positions = new Float32Array([0, 0, 0]);
-            const result = colorizeVertices(positions, bvh, columns, voxelResolution, 'topk');
-
-            // both candidates used: identical to the gaussian-mode average
-            const sumW = wFar + wNear;
-            assertClose(result[0], srgbToLinear(wFar / sumW), 1e-4, 'red channel');
-            assertClose(result[1], srgbToLinear(0), 1e-4, 'green channel');
-            assertClose(result[2], srgbToLinear(wNear / sumW), 1e-4, 'blue channel');
-        });
+        assertClose(result[0], srgbToLinear(0.8), 1e-4, 'red channel median');
+        // green/blue are uniform 0.5 across both splats
+        assertClose(result[1], srgbToLinear(0.5), 1e-4, 'green channel');
+        assertClose(result[2], srgbToLinear(0.5), 1e-4, 'blue channel');
     });
 
-    describe('column requirements', () => {
-        it('throws for non-average modes when rot/scale columns are missing', () => {
-            const { bvh, columns } = makeSplatFixture(nearFarSplats);
-            const positions = new Float32Array([0, 0, 0]);
-
-            const colorOnly = {
-                f_dc_0: columns.f_dc_0,
-                f_dc_1: columns.f_dc_1,
-                f_dc_2: columns.f_dc_2,
-                opacity: columns.opacity
-            };
-
-            for (const mode of ['dominant', 'topk', 'gaussian']) {
-                assert.throws(
-                    () => colorizeVertices(positions, bvh, colorOnly, voxelResolution, mode),
-                    new RegExp(`mode '${mode}'.*rot_0.*scale_2`),
-                    `${mode} mode should throw naming the missing columns`
-                );
-            }
-
-            // partially present columns throw too, naming only what is missing
-            const rotOnly = { ...colorOnly, rot_0: columns.rot_0, rot_1: columns.rot_1, rot_2: columns.rot_2, rot_3: columns.rot_3 };
-            assert.throws(
-                () => colorizeVertices(positions, bvh, rotOnly, voxelResolution, 'gaussian'),
-                /scale_0.*scale_1.*scale_2/,
-                'gaussian mode should throw naming the missing scale columns'
-            );
-
-            // average mode never requires rot/scale columns
-            assert.doesNotThrow(() => colorizeVertices(positions, bvh, colorOnly, voxelResolution));
-        });
-    });
-
-    describe('zero weights', () => {
-        it('falls back to mid-grey when all densities are zero (zero-length quaternion)', () => {
-            const splats = [
-                { center: [0, 0, 0], extent: [0.5, 0.5, 0.5], color: [1, 0, 0], logit: 0, quat: [0, 0, 0, 0], logScale: [0, 0, 0] }
-            ];
-            const { bvh, columns } = makeSplatFixture(splats);
-            const positions = new Float32Array([0, 0, 0]);
-
-            const grey = srgbToLinear(0.5);
-            assertClose(grey, 0.21404114, 1e-6, 'linear grey sanity check');
-
-            for (const mode of ['dominant', 'topk', 'gaussian']) {
-                const result = colorizeVertices(positions, bvh, columns, voxelResolution, mode);
-                assertClose(result[0], grey, 1e-4, `${mode} red channel`);
-                assertClose(result[1], grey, 1e-4, `${mode} green channel`);
-                assertClose(result[2], grey, 1e-4, `${mode} blue channel`);
-            }
-        });
-    });
-
-    describe('size-coverage factor', () => {
-        // Reproduces the real-scene bug: a tiny, near-opaque "artifact" splat
-        // sits at *exactly* the same center as a large, correctly-colored,
-        // moderate-opacity splat. Because the Mahalanobis density term only
-        // depends on offset/sigma and both splats have offset 0, the raw
-        // density is 1.0 for both regardless of size -- so before the fix the
-        // higher-opacity tiny splat always wins, however small it is.
-        //
-        //   splat A "large/correct": center (0,0,0), sigma 1.0,   green,       opacity logit 0
-        //   splat B "tiny artifact": center (0,0,0), sigma 0.01,  near-black,  opacity logit 8
-        //
-        // Both offsets are 0 -> m^2 = 0 -> exp(-0.5 * m^2) = 1 for both.
-        //
-        // Size factor: sizeFactor(sigma) = min(1, sigma / voxelResolution) ** 2
-        //   sfA = min(1, 1.0 / 0.5) ** 2  = min(1, 2)    ** 2 = 1 ** 2      = 1
-        //   sfB = min(1, 0.01 / 0.5) ** 2 = min(1, 0.02) ** 2 = 0.02 ** 2   = 0.0004
-        //
-        // Weight w = sigmoid(logit) * exp(-0.5 * m^2) * sizeFactor:
-        //   wA (fixed) = sigmoid(0) * 1 * 1      = 0.5
-        //   wB (fixed) = sigmoid(8) * 1 * 0.0004 = 0.9996646498695336 * 0.0004
-        //              = 0.00039986585994781343
-        //   -> wA > wB, so the large correct splat now wins.
-        //
-        // Without the size factor (the pre-fix formula), the weights are:
-        //   wA (buggy) = sigmoid(0) = 0.5
-        //   wB (buggy) = sigmoid(8) = 0.9996646498695336
-        //   -> wB > wA, so the tiny artifact wins instead (the bug).
-        const colorA = [0.1, 0.8, 0.2];
-        const colorB = [0.02, 0.02, 0.02];
-        const sizeSplats = [
-            { center: [0, 0, 0], extent: [1, 1, 1], color: colorA, logit: 0, quat: identity, logScale: [0, 0, 0] },
-            { center: [0, 0, 0], extent: [0.05, 0.05, 0.05], color: colorB, logit: 8, quat: identity, logScale: [Math.log(0.01), Math.log(0.01), Math.log(0.01)] }
+    it('snaps to the majority color instead of blending unlike colors', () => {
+        // one bright red splat vs two dim blue splats of higher total opacity:
+        // the average blends toward purple, the median picks one side
+        const mixed = [
+            { center: [0, 0, 0], extent: 0.5, color: [0.9, 0.1, 0.1], logit: 0 },
+            { center: [0.2, 0, 0], extent: 0.5, color: [0.1, 0.1, 0.9], logit: 1 },
+            { center: [0.4, 0, 0], extent: 0.5, color: [0.1, 0.1, 0.9], logit: 1 }
         ];
-        const wA = 0.5;
-        const wB = 0.00039986585994781343;
+        const { bvh, columns } = makeSplatFixture(mixed);
 
-        it('dominant mode picks the large correct splat, not the tiny sub-voxel artifact', () => {
-            const { bvh, columns } = makeSplatFixture(sizeSplats);
-            const result = colorizeVertices(new Float32Array([0, 0, 0]), bvh, columns, voxelResolution, 'dominant');
+        const average = colorizeVertices(positions, noNormals(3), bvh, columns, voxelResolution, 'average');
+        const solid = colorizeVertices(positions, noNormals(3), bvh, columns, voxelResolution, 'solid');
 
-            // wA > wB with the size factor applied, so the output is splat A's
-            // green, not splat B's near-black.
-            assertClose(result[0], srgbToLinear(colorA[0]), 1e-4, 'red channel');
-            assertClose(result[1], srgbToLinear(colorA[1]), 1e-4, 'green channel');
-            assertClose(result[2], srgbToLinear(colorA[2]), 1e-4, 'blue channel');
-        });
-
-        it('gaussian mode weights the size-discounted candidates toward the large splat', () => {
-            const { bvh, columns } = makeSplatFixture(sizeSplats);
-            const result = colorizeVertices(new Float32Array([0, 0, 0]), bvh, columns, voxelResolution, 'gaussian');
-
-            const sumW = wA + wB;
-            const expected = colorA.map((c, i) => srgbToLinear((wA * c + wB * colorB[i]) / sumW));
-
-            assertClose(result[0], expected[0], 1e-4, 'red channel');
-            assertClose(result[1], expected[1], 1e-4, 'green channel');
-            assertClose(result[2], expected[2], 1e-4, 'blue channel');
-
-            // Sanity: without the size factor the weights are wA_old =
-            // sigmoid(0) = 0.5 and wB_old = sigmoid(8) = 0.9996646498695336,
-            // which pulls the blend heavily toward the tiny near-black
-            // artifact instead. Confirm the fixed result is nowhere near
-            // that buggy blend.
-            const wA_old = 0.5;
-            const wB_old = 0.9996646498695336;
-            const sumW_old = wA_old + wB_old;
-            const buggyBlend = colorA.map((c, i) => srgbToLinear((wA_old * c + wB_old * colorB[i]) / sumW_old));
-
-            assert(Math.abs(result[1] - buggyBlend[1]) > 0.3,
-                'the size-discounted green channel must differ substantially from the buggy (unweighted-by-size) blend');
-        });
+        // red channel values: 0.1 (w1), 0.1 (w2), 0.9 (w0); total = 0.5 + 2*sigmoid(1);
+        // half = 0.981; cum: sigmoid(1) = 0.731 < half; 2*sigmoid(1) = 1.462 >= half -> 0.1
+        assertClose(solid[0], srgbToLinear(0.1), 1e-4, 'solid red snaps to majority');
+        // average red = (0.9*0.5 + 0.1*2*sigmoid(1)) / total ~= 0.314
+        assert(srgbToLinear(0.1) < average[0] - 0.02, 'average must blend toward red');
     });
 });

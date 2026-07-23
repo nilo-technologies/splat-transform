@@ -1,5 +1,5 @@
 import type { Bounds } from '../data-table';
-import { colorizeVertices, coplanarMerge, marchingCubes, voxelFaces, type Mesh, type SplatColorColumns } from '../mesh';
+import { colorizeVertices, computeVertexNormals, coplanarMerge, marchingCubes, voxelFaces, type Mesh, type SplatColorColumns } from '../mesh';
 import type { GaussianBVH } from '../spatial';
 import type { CollisionColorMode, CollisionMeshShape } from '../types';
 import { fmtCount, logger } from '../utils';
@@ -199,8 +199,7 @@ function encodeGlb(positions: Float32Array, indices: Uint32Array, colors?: Float
  * merging. `voxel` and `tris` also bake splat colors into a COLOR_0 vertex
  * attribute.
  * @param colorSource - Splat BVH, color columns and coloring mode used to
- * colorize mesh vertices. `columns` must include `rot_0..3` and `scale_0..2`
- * when `mode` is not `'average'`. Required for the `voxel` and `tris` shapes,
+ * colorize mesh vertices. Required for the `voxel` and `tris` shapes,
  * ignored otherwise.
  * @returns GLB bytes, or null if no triangles were generated
  * @throws Error if shape is `voxel` or `tris` and `colorSource` is null
@@ -257,7 +256,8 @@ const buildCollisionMesh = (
             throw new Error(`colorSource is required for collision mesh shape '${shape}'`);
         }
         const colorSub = logger.group('Coloring vertices');
-        colors = colorizeVertices(finalMesh.positions, colorSource.bvh, colorSource.columns, voxelResolution, colorSource.mode);
+        const normals = computeVertexNormals(finalMesh.positions, finalMesh.indices);
+        colors = colorizeVertices(finalMesh.positions, normals, colorSource.bvh, colorSource.columns, voxelResolution, colorSource.mode);
         colorSub.end();
     }
 

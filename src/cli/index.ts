@@ -292,8 +292,8 @@ const parseArguments = async () => {
     const parseCollisionColorMode = (value: string | undefined): CollisionColorMode | undefined => {
         if (value === undefined) return undefined;
         const normalized = value.toLowerCase();
-        if (normalized === 'average' || normalized === 'dominant' || normalized === 'topk' || normalized === 'gaussian') return normalized;
-        throw new Error(`Invalid collision color mode: ${value}. Expected average, dominant, topk or gaussian.`);
+        if (normalized === 'average' || normalized === 'solid') return normalized;
+        throw new Error(`Invalid collision color mode: ${value}. Expected average or solid.`);
     };
 
     const parseComparator = (value: string): 'lt' | 'lte' | 'gt' | 'gte' | 'eq' | 'neq' => {
@@ -813,7 +813,7 @@ VOXEL OUTPUT (.voxel.json)
         --voxel-carve [h,r]                 Carve navigable space using capsule flood fill from seed. Default: 1.6,0.2
         --seed-pos         <x,y,z>          Seed position for voxel processing and --filter-cluster. Default: 0,0,0
     -K, --collision-mesh   [smooth|faces|voxel|tris]   Generate collision mesh (.collision.glb). voxel/tris add per-vertex colors. Default shape: smooth
-        --collision-color    [average|dominant|topk|gaussian]   Vertex color algorithm for voxel/tris collision meshes. Default: average
+        --collision-color    [average|solid]   Vertex color algorithm for voxel/tris collision meshes. solid snaps to the majority color instead of blending. Default: average
 
 IMAGE OUTPUT (.webp) — lossless WebP rendered via GPU rasterizer
         --projection       <pinhole|equirect>  Camera projection. Default: pinhole.

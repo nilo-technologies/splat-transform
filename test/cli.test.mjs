@@ -120,7 +120,23 @@ describe('CLI parsing', () => {
         ]);
 
         assert.notStrictEqual(result.code, 0, 'CLI should reject --collision-color bogus');
-        assert.match(result.stderr, /Invalid collision color mode: bogus\. Expected average, dominant, topk or gaussian\./);
+        assert.match(result.stderr, /Invalid collision color mode: bogus\. Expected average or solid\./);
+    });
+
+    it('rejects the removed density-based modes', async () => {
+        for (const mode of ['dominant', 'topk', 'gaussian']) {
+            const result = await runCli([
+                '--gpu',
+                'cpu',
+                'test/fixtures/splat/minimal.splat',
+                '--collision-color',
+                mode,
+                'null'
+            ]);
+
+            assert.notStrictEqual(result.code, 0, `CLI should reject --collision-color ${mode}`);
+            assert.match(result.stderr, /Invalid collision color mode.*Expected average or solid\./);
+        }
     });
 
     it('accepts --collision-color case-insensitively', async () => {
@@ -129,7 +145,7 @@ describe('CLI parsing', () => {
             'cpu',
             'test/fixtures/splat/minimal.splat',
             '--collision-color',
-            'DOMINANT',
+            'SOLID',
             '--collision-mesh',
             'voxel',
             'null'
@@ -145,7 +161,7 @@ describe('CLI parsing', () => {
             'cpu',
             'test/fixtures/splat/minimal.splat',
             '--collision-color',
-            'topk',
+            'solid',
             'null'
         ]);
 
@@ -161,7 +177,7 @@ describe('CLI parsing', () => {
             '--collision-mesh',
             'faces',
             '--collision-color',
-            'gaussian',
+            'average',
             'null'
         ]);
 

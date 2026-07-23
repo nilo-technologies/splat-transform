@@ -11,12 +11,14 @@ type CollisionMeshShape = 'smooth' | 'faces' | 'voxel' | 'tris';
 /**
  * Vertex color algorithm for colored collision meshes (`voxel`/`tris` shapes).
  *
- * - `average` - opacity-weighted average of all touching splats (default, original behavior).
- * - `dominant` - color of the single highest-weight splat (opacity × Gaussian density).
- * - `topk` - renormalized weighted average of the top 3 splats by weight.
- * - `gaussian` - weighted average with full opacity × Gaussian-density weights.
+ * Both modes restrict candidates structurally first: splats must be near the
+ * vertex and (when the vertex has a usable normal) on the inward side of the
+ * surface, so unrelated splats cannot bleed color across it.
+ *
+ * - `average` - opacity-weighted mean of the gated candidates (smooth).
+ * - `solid` - opacity-weighted per-channel median of the gated candidates; snaps to the majority color instead of blending (crisp).
  */
-type CollisionColorMode = 'average' | 'dominant' | 'topk' | 'gaussian';
+type CollisionColorMode = 'average' | 'solid';
 
 /**
  * Options for read/write operations.
