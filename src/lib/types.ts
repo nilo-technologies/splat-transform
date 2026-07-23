@@ -72,6 +72,9 @@ type Options = {
     /** Vertex color algorithm for `voxel`/`tris` collision meshes. Ignored for grey shapes. Default: `'average'`. */
     collisionColorMode?: CollisionColorMode;
 
+    /** Quantize collision-mesh vertex colors to a k-means palette of this many colors. Off by default. Applies to `voxel`/`tris` collision meshes. */
+    collisionColorPalette?: number;
+
     /** Camera projection for image output: `'pinhole'` (default) or `'equirect'` (360°×180° panorama). */
     renderProjection?: 'pinhole' | 'equirect';
 

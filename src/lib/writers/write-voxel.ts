@@ -61,6 +61,9 @@ type WriteVoxelOptions = {
 
     /** Vertex color algorithm for `voxel`/`tris` collision meshes. Ignored for grey shapes. Default: `'average'` */
     collisionColorMode?: CollisionColorMode;
+
+    /** Quantize collision-mesh vertex colors to a k-means palette of this many colors. Must be an integer >= 1. Default: off. */
+    collisionColorPalette?: number;
 };
 
 /**
@@ -331,7 +334,8 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         navCapsule,
         navSeed,
         collisionMesh = false,
-        collisionColorMode = 'average'
+        collisionColorMode = 'average',
+        collisionColorPalette
     } = options;
 
     if (!createDevice) {
@@ -346,6 +350,10 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         throw new Error(`Invalid collisionMesh value: ${String(collisionMesh)}. Expected true, false, "smooth", "faces", "voxel", or "tris"`);
     })();
     const coloredCollisionMesh = collisionMeshShape === 'voxel' || collisionMeshShape === 'tris';
+
+    if (collisionColorPalette !== undefined && (!Number.isInteger(collisionColorPalette) || collisionColorPalette < 1)) {
+        throw new Error(`collisionColorPalette must be an integer >= 1, got ${collisionColorPalette}`);
+    }
 
     if (navCapsule && !navSeed) {
         logger.warn('navCapsule requires navSeed for nav carving, skipping nav carving');
@@ -519,7 +527,8 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
                 f_dc_2: pcDataTable!.getColumnByName('f_dc_2')!.data,
                 opacity: pcDataTable!.getColumnByName('opacity')!.data
             },
-            mode: collisionColorMode
+            mode: collisionColorMode,
+            paletteK: collisionColorPalette
         } : null;
 
         const glbBytes = collisionMeshShape ?

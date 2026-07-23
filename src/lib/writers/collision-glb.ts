@@ -1,5 +1,5 @@
 import type { Bounds } from '../data-table';
-import { colorizeVertices, computeVertexNormals, coplanarMerge, marchingCubes, voxelFaces, type Mesh, type SplatColorColumns } from '../mesh';
+import { colorizeVertices, computeVertexNormals, coplanarMerge, marchingCubes, palettizeColors, voxelFaces, type Mesh, type SplatColorColumns } from '../mesh';
 import type { GaussianBVH } from '../spatial';
 import type { CollisionColorMode, CollisionMeshShape } from '../types';
 import { fmtCount, logger } from '../utils';
@@ -198,9 +198,9 @@ function encodeGlb(positions: Float32Array, indices: Uint32Array, colors?: Float
  * the voxel-face mesh, `smooth` and `tris` use marching cubes with coplanar
  * merging. `voxel` and `tris` also bake splat colors into a COLOR_0 vertex
  * attribute.
- * @param colorSource - Splat BVH, color columns and coloring mode used to
- * colorize mesh vertices. Required for the `voxel` and `tris` shapes,
- * ignored otherwise.
+ * @param colorSource - Splat BVH, color columns, coloring mode, and optional
+ * palette quantisation setting used to colorize mesh vertices. Required for
+ * the `voxel` and `tris` shapes, ignored otherwise.
  * @returns GLB bytes, or null if no triangles were generated
  * @throws Error if shape is `voxel` or `tris` and `colorSource` is null
  */
@@ -209,7 +209,7 @@ const buildCollisionMesh = (
     gridBounds: Bounds,
     voxelResolution: number,
     shape: CollisionMeshShape = 'smooth',
-    colorSource: { bvh: GaussianBVH; columns: SplatColorColumns; mode: CollisionColorMode } | null = null
+    colorSource: { bvh: GaussianBVH; columns: SplatColorColumns; mode: CollisionColorMode; paletteK?: number } | null = null
 ): Uint8Array | null => {
     const g = logger.group('Collision mesh');
 
@@ -258,6 +258,11 @@ const buildCollisionMesh = (
         const colorSub = logger.group('Coloring vertices');
         const normals = computeVertexNormals(finalMesh.positions, finalMesh.indices);
         colors = colorizeVertices(finalMesh.positions, normals, colorSource.bvh, colorSource.columns, voxelResolution, colorSource.mode);
+
+        if (colorSource.paletteK !== undefined && colorSource.paletteK >= 1) {
+            colors = palettizeColors(colors, colorSource.paletteK);
+            logger.info(`palette: ${colorSource.paletteK} colours`);
+        }
         colorSub.end();
     }
 

@@ -143,6 +143,7 @@ const cliOptionsConfig = {
     'seed-pos': { type: 'string', default: '' },
     'collision-mesh': { type: 'string', short: 'K' },
     'collision-color': { type: 'string' },
+    'collision-color-palette': { type: 'string' },
     'projection': { type: 'string' },
     'camera': { type: 'string' },
     'look-at': { type: 'string' },
@@ -401,6 +402,18 @@ const parseArguments = async () => {
         logger.warn('--collision-color only applies to voxel/tris collision meshes and will be ignored.');
         collisionColorMode = undefined;
     }
+
+    let collisionColorPalette: number | undefined;
+    if (v['collision-color-palette'] !== undefined) {
+        collisionColorPalette = parseInteger(v['collision-color-palette']);
+        if (collisionColorPalette < 1) {
+            throw new Error(`Invalid collision-color-palette value: ${v['collision-color-palette']}. Must be >= 1.`);
+        }
+        if (collisionMesh === false || collisionMesh === 'faces' || collisionMesh === 'smooth') {
+            logger.warn('--collision-color-palette only applies to voxel/tris collision meshes and will be ignored.');
+            collisionColorPalette = undefined;
+        }
+    }
     const spzVersion = parseInteger(v['spz-version']);
     if (spzVersion !== 3 && spzVersion !== 4) {
         throw new Error(`Invalid spz-version value: ${v['spz-version']}. Must be 3 or 4.`);
@@ -517,6 +530,7 @@ const parseArguments = async () => {
         navSeed,
         collisionMesh,
         collisionColorMode,
+        collisionColorPalette,
         renderProjection,
         renderCameraPosition,
         renderLookAt,
@@ -814,6 +828,7 @@ VOXEL OUTPUT (.voxel.json)
         --seed-pos         <x,y,z>          Seed position for voxel processing and --filter-cluster. Default: 0,0,0
     -K, --collision-mesh   [smooth|faces|voxel|tris]   Generate collision mesh (.collision.glb). voxel/tris add per-vertex colors. Default shape: smooth
         --collision-color    [average|solid]   Vertex color algorithm for voxel/tris collision meshes. solid snaps to the majority color instead of blending. Default: average
+        --collision-color-palette   <n>   Quantize collision mesh vertex colors to an n-color palette. Default: off
 
 IMAGE OUTPUT (.webp) — lossless WebP rendered via GPU rasterizer
         --projection       <pinhole|equirect>  Camera projection. Default: pinhole.

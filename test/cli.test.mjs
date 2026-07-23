@@ -184,4 +184,61 @@ describe('CLI parsing', () => {
         assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
         assert.match(result.stderr, /--collision-color.*ignored/i);
     });
+
+    it('rejects --collision-color-palette with a non-integer value', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-color-palette',
+            'notanumber',
+            'null'
+        ]);
+
+        assert.notStrictEqual(result.code, 0, 'CLI should reject non-integer collision-color-palette');
+    });
+
+    it('rejects --collision-color-palette with value < 1', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-color-palette',
+            '0',
+            'null'
+        ]);
+
+        assert.notStrictEqual(result.code, 0, 'CLI should reject collision-color-palette < 1');
+        assert.match(result.stderr, />= 1/);
+    });
+
+    it('warns and ignores --collision-color-palette without a collision mesh', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-color-palette',
+            '8',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+        assert.match(result.stderr, /--collision-color-palette.*ignored/i);
+    });
+
+    it('accepts a valid --collision-color-palette value', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-mesh',
+            'voxel',
+            '--collision-color-palette',
+            '16',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+        assert.doesNotMatch(result.stderr, /palette/i);
+    });
 });

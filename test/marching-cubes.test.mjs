@@ -649,6 +649,32 @@ describe('buildCollisionMesh vertex colors', () => {
                 `vertex ${i} blue: expected 1, got ${colors[i * 3 + 2]}`);
         }
     });
+
+    it('should quantize vertex colors to a palette when paletteK is set', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        const colorSource = makeSingleSplatColorSource(2, 2, 2, 4, [0.8, 0.2, 0.5], 0);
+        colorSource.paletteK = 1;
+
+        const bytes = buildCollisionMesh(solidGrid(), bounds, 1.0, 'voxel', colorSource);
+        assert.ok(bytes, 'voxel should produce GLB output');
+
+        const { json, bin } = parseGlb(bytes);
+
+        const colorAccessor = json.accessors[2];
+        const colorView = json.bufferViews[2];
+        const colors = new Float32Array(
+            bin.buffer, bin.byteOffset + colorView.byteOffset, colorAccessor.count * 3);
+
+        // k=1 palette snaps every vertex to the global mean; all triplets
+        // must be identical (all channels equal across all vertices)
+        const ref = [colors[0], colors[1], colors[2]];
+        for (let i = 1; i < colorAccessor.count; i++) {
+            for (let c = 0; c < 3; c++) {
+                assert.strictEqual(colors[i * 3 + c], ref[c],
+                    `vertex ${i} channel ${c}: all vertices must be identical with k=1`);
+            }
+        }
+    });
 });
 
 describe('coplanarMerge', () => {

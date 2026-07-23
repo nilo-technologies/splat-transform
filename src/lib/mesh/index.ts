@@ -5,3 +5,4 @@ export { voxelFaces } from './voxel-faces';
 export { computeVertexNormals } from './normals';
 export { colorizeVertices } from './colorize';
 export type { SplatColorColumns } from './colorize';
+export { palettizeColors } from './palette';
