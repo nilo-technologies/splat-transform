@@ -545,7 +545,8 @@ describe('buildCollisionMesh vertex colors', () => {
                 metallicFactor: 0,
                 roughnessFactor: 1
             },
-            doubleSided: true
+            doubleSided: true,
+            extensions: { KHR_materials_unlit: {} }
         }]);
 
         const colorAccessor = json.accessors[2];

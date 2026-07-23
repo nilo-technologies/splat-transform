@@ -97,6 +97,8 @@ function encodeGlb(positions: Float32Array, indices: Uint32Array, colors?: Float
         bufferViews: object[];
         buffers: object[];
         materials?: object[];
+        extensionsUsed?: string[];
+        extensionsRequired?: string[];
     } = {
         asset: { version: '2.0', generator: 'splat-transform' },
         scene: 0,
@@ -131,8 +133,11 @@ function encodeGlb(positions: Float32Array, indices: Uint32Array, colors?: Float
                 metallicFactor: 0,
                 roughnessFactor: 1
             },
-            doubleSided: true
+            doubleSided: true,
+            extensions: { KHR_materials_unlit: {} }
         }];
+        gltf.extensionsUsed = ['KHR_materials_unlit'];
+        gltf.extensionsRequired = ['KHR_materials_unlit'];
     }
 
     const jsonString = JSON.stringify(gltf);
