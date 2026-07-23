@@ -2,13 +2,11 @@ const srgbToLinear = (c: number): number => (c <= 0.04045 ? c / 12.92 : ((c + 0.
 
 const linearToSrgb = (c: number): number => (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
 
-const luminance = (r: number, g: number, b: number): number => 0.2126 * r + 0.7152 * g + 0.0722 * b;
-
 /**
  * Snap vertex colors to a deterministic k-means palette in perceptual sRGB
  * space, returning the quantized colors back in linear space.
  *
- * Centroids are initialized deterministically from luminance quantiles of the
+ * Centroids are initialized deterministically via farthest-first traversal of
  * sRGB vertex colors, and exactly 10 Lloyd iterations are run (no
  * randomisation at any step). When `k >= vertexCount` the input is returned
  * as-is (no-op; the palette would merely repeat the data).
@@ -50,19 +48,73 @@ const palettizeColors = (linearColors: Float32Array, k: number): Float32Array =>
         srgb[i] = linearToSrgb(linearColors[i]);
     }
 
-    // deterministic centroid initialisation via luminance quantiles
+    // farthest-first traversal centroid initialization
     const centroids = new Float32Array(effK * 3);
-    const lum = new Float64Array(vertexCount);
+
+    // compute global mean in sRGB
+    let sumR = 0, sumG = 0, sumB = 0;
     for (let v = 0; v < vertexCount; v++) {
-        lum[v] = luminance(srgb[v * 3], srgb[v * 3 + 1], srgb[v * 3 + 2]);
+        sumR += srgb[v * 3];
+        sumG += srgb[v * 3 + 1];
+        sumB += srgb[v * 3 + 2];
     }
-    const order = Array.from({ length: vertexCount }, (v, i) => i);
-    order.sort((a, b) => lum[a] - lum[b]);
-    for (let c = 0; c < effK; c++) {
-        const idx = order[Math.min(Math.floor((2 * c + 1) / (2 * effK) * vertexCount), vertexCount - 1)];
-        centroids[c * 3] = srgb[idx * 3];
-        centroids[c * 3 + 1] = srgb[idx * 3 + 1];
-        centroids[c * 3 + 2] = srgb[idx * 3 + 2];
+    const meanR = sumR / vertexCount;
+    const meanG = sumG / vertexCount;
+    const meanB = sumB / vertexCount;
+
+    // first centroid = vertex closest to global mean
+    let firstIdx = 0;
+    let firstBestDist = Infinity;
+    for (let v = 0; v < vertexCount; v++) {
+        const dr = srgb[v * 3] - meanR;
+        const dg = srgb[v * 3 + 1] - meanG;
+        const db = srgb[v * 3 + 2] - meanB;
+        const d2 = dr * dr + dg * dg + db * db;
+        if (d2 < firstBestDist) {
+            firstBestDist = d2;
+            firstIdx = v;
+        }
+    }
+    centroids[0] = srgb[firstIdx * 3];
+    centroids[1] = srgb[firstIdx * 3 + 1];
+    centroids[2] = srgb[firstIdx * 3 + 2];
+
+    // minDist to distances from first centroid
+    const minDist = new Float64Array(vertexCount);
+    for (let v = 0; v < vertexCount; v++) {
+        const dr = srgb[v * 3] - centroids[0];
+        const dg = srgb[v * 3 + 1] - centroids[1];
+        const db = srgb[v * 3 + 2] - centroids[2];
+        minDist[v] = dr * dr + dg * dg + db * db;
+    }
+
+    // for each subsequent centroid
+    for (let c = 1; c < effK; c++) {
+        // find vertex with max minDist (tie-break by lower index)
+        let maxDist = minDist[0];
+        let bestIdx = 0;
+        for (let v = 1; v < vertexCount; v++) {
+            if (minDist[v] > maxDist) {
+                maxDist = minDist[v];
+                bestIdx = v;
+            }
+        }
+
+        const base = c * 3;
+        centroids[base] = srgb[bestIdx * 3];
+        centroids[base + 1] = srgb[bestIdx * 3 + 1];
+        centroids[base + 2] = srgb[bestIdx * 3 + 2];
+
+        // update minDist with distances to new centroid
+        for (let v = 0; v < vertexCount; v++) {
+            const dr = srgb[v * 3] - centroids[base];
+            const dg = srgb[v * 3 + 1] - centroids[base + 1];
+            const db = srgb[v * 3 + 2] - centroids[base + 2];
+            const d2 = dr * dr + dg * dg + db * db;
+            if (d2 < minDist[v]) {
+                minDist[v] = d2;
+            }
+        }
     }
 
     const assignments = new Uint32Array(vertexCount);
