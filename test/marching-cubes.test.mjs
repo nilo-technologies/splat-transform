@@ -545,8 +545,7 @@ describe('buildCollisionMesh vertex colors', () => {
                 metallicFactor: 0,
                 roughnessFactor: 1
             },
-            doubleSided: true,
-            extensions: { KHR_materials_unlit: {} }
+            doubleSided: true
         }]);
 
         const colorAccessor = json.accessors[2];
@@ -677,12 +676,11 @@ describe('buildCollisionMesh vertex colors', () => {
         }
     });
 
-    it('should flat-shade each triangle to a uniform per-face colour', () => {
+    it('should flat-shade each voxel quad to a uniform colour', () => {
         const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
         // two splats at opposite corners produce distinct vertex colours before
-        // flat-shading; after flat-shading the mesh is un-indexed so every
-        // group of 3 consecutive vertices belongs to the same triangle and
-        // must share identical colours
+        // flat-shading; after flat-shading the mesh is un-indexed with per-quad
+        // colours so both triangles of each voxel face share identical colours
         const colorSource = makeSplatColorSource([
             { center: [0, 0, 0], extent: 4, color: [1, 0, 0], logit: 0 },
             { center: [4, 4, 4], extent: 4, color: [0, 0, 1], logit: 0 }
@@ -700,20 +698,32 @@ describe('buildCollisionMesh vertex colors', () => {
 
         const colors = new Float32Array(bin.buffer, bin.byteOffset + colorView.byteOffset, colorAccessor.count * 3);
 
-        // un-indexed mesh: every 3 consecutive vertices form a triangle;
-        // verify each triangle's 3 vertices have identical colours
         let trianglesChecked = 0;
+        let quadPairsChecked = 0;
         for (let t = 0; t < posAccessor.count; t += 3) {
             const off = t * 3;
+            // each triangle's 3 vertices must share the same colour
             for (let ch = 0; ch < 3; ch++) {
                 assert.strictEqual(colors[off + ch], colors[off + 3 + ch],
                     `triangle ${t / 3} channel ${ch}: vertex 0 and 1 must match`);
                 assert.strictEqual(colors[off + ch], colors[off + 6 + ch],
                     `triangle ${t / 3} channel ${ch}: vertex 0 and 2 must match`);
             }
+            // consecutive triangles in a per-voxel mesh form quad pairs;
+            // even-indexed triangles should share colours with their odd
+            // partner
+            if (t > 0 && (t / 3) % 2 === 1) {
+                const prevOff = off - 9; // previous triangle's colour offset
+                for (let ch = 0; ch < 3; ch++) {
+                    assert.strictEqual(colors[off + ch], colors[prevOff + ch],
+                        `quad pair triangle ${t / 3} channel ${ch}: must match its partner`);
+                }
+                quadPairsChecked++;
+            }
             trianglesChecked++;
         }
         assert.ok(trianglesChecked >= 8, `must check at least 8 triangles, got ${trianglesChecked}`);
+        assert.ok(quadPairsChecked >= 4, `must check at least 4 quad pairs, got ${quadPairsChecked}`);
     });
 });
 

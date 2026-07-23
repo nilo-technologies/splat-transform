@@ -97,8 +97,6 @@ function encodeGlb(positions: Float32Array, indices: Uint32Array, colors?: Float
         bufferViews: object[];
         buffers: object[];
         materials?: object[];
-        extensionsUsed?: string[];
-        extensionsRequired?: string[];
     } = {
         asset: { version: '2.0', generator: 'splat-transform' },
         scene: 0,
@@ -133,11 +131,8 @@ function encodeGlb(positions: Float32Array, indices: Uint32Array, colors?: Float
                 metallicFactor: 0,
                 roughnessFactor: 1
             },
-            doubleSided: true,
-            extensions: { KHR_materials_unlit: {} }
+            doubleSided: true
         }];
-        gltf.extensionsUsed = ['KHR_materials_unlit'];
-        gltf.extensionsRequired = ['KHR_materials_unlit'];
     }
 
     const jsonString = JSON.stringify(gltf);
@@ -224,7 +219,7 @@ const buildCollisionMesh = (
     let finalMesh: Mesh;
     if (shape === 'faces' || shape === 'voxel') {
         const extractSub = logger.group('Extracting voxel faces');
-        finalMesh = voxelFaces(grid, gridBounds, voxelResolution);
+        finalMesh = voxelFaces(grid, gridBounds, voxelResolution, { perVoxel: shape === 'voxel' });
         logger.info(`vertices: ${fmtCount(finalMesh.positions.length / 3)}`);
         logger.info(`triangles: ${fmtCount(finalMesh.indices.length / 3)}`);
         extractSub.end();
@@ -271,7 +266,102 @@ const buildCollisionMesh = (
         }
 
         if (colorSource.flatShade) {
+            const isVoxel = shape === 'voxel';
             const numTris = finalMesh.indices.length / 3;
+
+            // per-quad colours for voxel faces (each quad = 2 triangles)
+            let quadColor: Float32Array | null = null;
+            if (isVoxel) {
+                // build an edge map to find the two triangles forming each
+                // voxel quad. The diagonal edge has length ≈ √2·voxelResolution
+                // in world space; perimeter edges are exactly voxelResolution.
+                const edgeKey = (a: number, b: number): number => (a < b ? a * 0x100000000 + b : b * 0x100000000 + a);
+
+                interface EdgeInfo { tris: number[]; len2: number }
+
+                const edgeToInfo = new Map<number, EdgeInfo>();
+                for (let t = 0; t < numTris; t++) {
+                    const a = finalMesh.indices[t * 3];
+                    const b = finalMesh.indices[t * 3 + 1];
+                    const c = finalMesh.indices[t * 3 + 2];
+                    for (const [u, v] of [[a, b], [b, c], [c, a]]) {
+                        const k = edgeKey(u, v);
+                        let info = edgeToInfo.get(k);
+                        if (!info) {
+                            const uOff = u * 3, vOff = v * 3;
+                            const dx = finalMesh.positions[uOff] - finalMesh.positions[vOff];
+                            const dy = finalMesh.positions[uOff + 1] - finalMesh.positions[vOff + 1];
+                            const dz = finalMesh.positions[uOff + 2] - finalMesh.positions[vOff + 2];
+                            info = { tris: [], len2: dx * dx + dy * dy + dz * dz };
+                            edgeToInfo.set(k, info);
+                        }
+                        info.tris.push(t);
+                    }
+                }
+
+                // pair triangles by the diagonal edge (the longer edge shared
+                // by exactly two triangles)
+                const quadPartner = new Int32Array(numTris).fill(-1);
+                for (const info of edgeToInfo.values()) {
+                    if (info.tris.length === 2 && info.tris[0] !== info.tris[1]) {
+                        // diagonal is approx √2 * voxelResolution long
+                        if (info.len2 > voxelResolution * voxelResolution * 1.5) {
+                            const t = info.tris[0];
+                            const s = info.tris[1];
+                            quadPartner[t] = s;
+                            quadPartner[s] = t;
+                        }
+                    }
+                }
+
+                // per-quad uniform colour: average the 4 vertex colours
+                quadColor = new Float32Array(numTris * 3);
+                const visited = new Uint8Array(numTris);
+                for (let t = 0; t < numTris; t++) {
+                    if (visited[t]) continue;
+                    const partner = quadPartner[t];
+                    let allVerts: number[];
+                    if (partner !== -1 && !visited[partner]) {
+                        // this triangle + its partner form a quad;
+                        // collect the 4 unique vertex indices
+                        const a = finalMesh.indices[t * 3];
+                        const b = finalMesh.indices[t * 3 + 1];
+                        const c = finalMesh.indices[t * 3 + 2];
+                        const dSet = new Set([a, b, c]);
+                        const partnerVerts = [
+                            finalMesh.indices[partner * 3],
+                            finalMesh.indices[partner * 3 + 1],
+                            finalMesh.indices[partner * 3 + 2]
+                        ];
+                        const extra = partnerVerts.filter(v => !dSet.has(v));
+                        allVerts = [a, b, c, ...extra];
+                        visited[partner] = 1;
+                    } else {
+                        allVerts = [
+                            finalMesh.indices[t * 3],
+                            finalMesh.indices[t * 3 + 1],
+                            finalMesh.indices[t * 3 + 2]
+                        ];
+                    }
+                    visited[t] = 1;
+
+                    // per-channel average across the quad's vertices
+                    const vOff = t * 3;
+                    const partnerOff = partner !== -1 ? partner * 3 : -1;
+                    for (let ch = 0; ch < 3; ch++) {
+                        let sum = 0;
+                        for (const v of allVerts) sum += colors[v * 3 + ch];
+                        const avg = sum / allVerts.length;
+                        quadColor[vOff + ch] = avg;
+                        if (partnerOff >= 0) quadColor[partnerOff + ch] = avg;
+                    }
+                }
+
+                // assign the quad colour to all 4 (or 3) vertices when
+                // un-indexing below
+                colors = quadColor;
+            }
+
             const flatPositions = new Float32Array(numTris * 9);
             const flatIndices = new Uint32Array(numTris * 3);
             const flatColors = new Float32Array(numTris * 9);
@@ -288,9 +378,14 @@ const buildCollisionMesh = (
                     flatPositions[t * 9 + 6 + k] = finalMesh.positions[c * 3 + k];
                 }
 
-                // per-channel average as the face's uniform colour
+                // per-face uniform colour: for voxel the pre-computed quadColor array
+                // already holds the value at t*3; for tris average the 3 vertex
+                // colours
+                const tOff = t * 3;
                 for (let ch = 0; ch < 3; ch++) {
-                    const avg = (colors[a * 3 + ch] + colors[b * 3 + ch] + colors[c * 3 + ch]) / 3;
+                    const avg = isVoxel ?
+                        colors[tOff + ch] :
+                        (colors[a * 3 + ch] + colors[b * 3 + ch] + colors[c * 3 + ch]) / 3;
                     flatColors[t * 9 + ch] = avg;
                     flatColors[t * 9 + 3 + ch] = avg;
                     flatColors[t * 9 + 6 + ch] = avg;
@@ -303,7 +398,9 @@ const buildCollisionMesh = (
 
             finalMesh = { positions: flatPositions, indices: flatIndices };
             colors = flatColors;
-            logger.info('flat-shading: un-indexed, per-face colours');
+            logger.info(isVoxel ?
+                'flat-shading: per-voxel-quad colours, un-indexed' :
+                'flat-shading: per-triangle colours, un-indexed');
         }
         colorSub.end();
     }

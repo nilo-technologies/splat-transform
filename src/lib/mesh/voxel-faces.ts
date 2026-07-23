@@ -14,21 +14,26 @@ const HASH_MUL = 0x9E3779B9;
 /**
  * Extract a watertight voxel-boundary mesh from a SparseVoxelGrid.
  *
- * Exposed voxel faces are first greedily merged into axis-aligned rectangles.
- * Rectangle boundaries are then split at every collinear rectangle corner
- * before triangulation, so adjacent rectangles share matching edges instead
- * of producing T-junctions.
+ * By default exposed voxel faces are first greedily merged into larger
+ * axis-aligned rectangles before triangulation, reducing triangle count.
+ * When `opts.perVoxel` is true each visible voxel face stays its own
+ * 1×1 quad — no merging.
  *
  * @param grid - Voxel grid after filtering / nav phases.
  * @param gridBounds - Grid bounds aligned to block boundaries.
  * @param voxelResolution - Size of each voxel in world units.
+ * @param opts - Optional flags.
+ * @param opts.perVoxel - Emit one 1×1 quad per visible voxel face instead
+ * of greedily merging coplanar neighbours. Defaults to false.
  * @returns Mesh with positions and indices.
  */
 const voxelFaces = (
     grid: SparseVoxelGrid,
     gridBounds: Bounds,
-    voxelResolution: number
+    voxelResolution: number,
+    opts?: { perVoxel?: boolean }
 ): Mesh => {
+    const perVoxel = opts?.perVoxel === true;
     const { nbx, nby, nbz, bStride, types, masks, nx, ny, nz } = grid;
     const totalBlocks = nbx * nby * nbz;
     const coordStride = Math.max(nx, ny, nz) + 1;
@@ -229,101 +234,118 @@ const voxelFaces = (
     faceKeys = new Float64Array(0);
     keys.sort();
 
-    const decodeGroup = (key: number): { bucket: number; p: number } => {
-        let q = Math.floor(key / coordStride);
-        q = Math.floor(q / coordStride);
-        const p = q % coordStride;
-        const bucket = Math.floor(q / coordStride);
-        return { bucket, p };
-    };
-
-    const decodeUvKey = (key: number): number => {
-        const v = key % coordStride;
-        const q = Math.floor(key / coordStride);
-        const u = q % coordStride;
-        return u * coordStride + v;
-    };
-
-    let groupStart = 0;
-    while (groupStart < keys.length) {
-        const { bucket, p } = decodeGroup(keys[groupStart]);
-        let groupEnd = groupStart + 1;
-        while (groupEnd < keys.length) {
-            const g = decodeGroup(keys[groupEnd]);
-            if (g.bucket !== bucket || g.p !== p) break;
-            groupEnd++;
+    if (perVoxel) {
+        // emit one 1×1 quad- rectangle per visible voxel face — no merging
+        for (let k = 0; k < keys.length; k++) {
+            const key = keys[k];
+            // key = ((bucket * coordStride + p) * coordStride + u) * coordStride + v
+            const q = Math.floor(key / coordStride);
+            const v = Math.floor(key - q * coordStride); // key % coordStride
+            const q2 = Math.floor(q / coordStride);
+            const u = Math.floor(q - q2 * coordStride); // q % coordStride
+            const bucket = Math.floor(q2 / coordStride);
+            const p = Math.floor(q2 - bucket * coordStride); // q2 % coordStride
+            addRect(bucket, p, u, v, u + 1, v + 1);
         }
+    } else {
+        // greedy-merge adjacent faces into larger rectangles
 
-        const count = groupEnd - groupStart;
-        let hCap = 1;
-        while (hCap < count / 0.7) hCap *= 2;
-        const hMask = hCap - 1;
-        const hKeys = new Float64Array(hCap).fill(-1);
-        const hVals = new Int32Array(hCap);
-
-        const hash = (key: number): number => {
-            const hi = (key / 0x100000000) | 0;
-            return (Math.imul((key | 0) ^ hi, HASH_MUL) >>> 0) & hMask;
+        const decodeGroup = (key: number): { bucket: number; p: number } => {
+            let q = Math.floor(key / coordStride);
+            q = Math.floor(q / coordStride);
+            const p = q % coordStride;
+            const bucket = Math.floor(q / coordStride);
+            return { bucket, p };
         };
 
-        for (let i = 0; i < count; i++) {
-            const uvKey = decodeUvKey(keys[groupStart + i]);
-            let h = hash(uvKey);
-            while (hKeys[h] !== -1) h = (h + 1) & hMask;
-            hKeys[h] = uvKey;
-            hVals[h] = i;
-        }
-
-        const lookup = (uvKey: number): number => {
-            let h = hash(uvKey);
-            while (true) {
-                const k = hKeys[h];
-                if (k === uvKey) return hVals[h];
-                if (k === -1) return -1;
-                h = (h + 1) & hMask;
-            }
+        const decodeUvKey = (key: number): number => {
+            const v = key % coordStride;
+            const q = Math.floor(key / coordStride);
+            const u = q % coordStride;
+            return u * coordStride + v;
         };
 
-        const visited = new Uint8Array(count);
-        const uvKeyOf = (u: number, v: number): number => u * coordStride + v;
-
-        for (let i = 0; i < count; i++) {
-            if (visited[i]) continue;
-            const uvKey = decodeUvKey(keys[groupStart + i]);
-            const u0 = Math.floor(uvKey / coordStride);
-            const v0 = uvKey % coordStride;
-
-            let width = 1;
-            while (true) {
-                const idx = lookup(uvKeyOf(u0 + width, v0));
-                if (idx === -1 || visited[idx]) break;
-                width++;
+        let groupStart = 0;
+        while (groupStart < keys.length) {
+            const { bucket, p } = decodeGroup(keys[groupStart]);
+            let groupEnd = groupStart + 1;
+            while (groupEnd < keys.length) {
+                const g = decodeGroup(keys[groupEnd]);
+                if (g.bucket !== bucket || g.p !== p) break;
+                groupEnd++;
             }
 
-            let height = 1;
-            while (true) {
-                let canGrow = true;
-                for (let du = 0; du < width; du++) {
-                    const idx = lookup(uvKeyOf(u0 + du, v0 + height));
-                    if (idx === -1 || visited[idx]) {
-                        canGrow = false;
-                        break;
+            const count = groupEnd - groupStart;
+            let hCap = 1;
+            while (hCap < count / 0.7) hCap *= 2;
+            const hMask = hCap - 1;
+            const hKeys = new Float64Array(hCap).fill(-1);
+            const hVals = new Int32Array(hCap);
+
+            const hash = (key: number): number => {
+                const hi = (key / 0x100000000) | 0;
+                return (Math.imul((key | 0) ^ hi, HASH_MUL) >>> 0) & hMask;
+            };
+
+            for (let i = 0; i < count; i++) {
+                const uvKey = decodeUvKey(keys[groupStart + i]);
+                let h = hash(uvKey);
+                while (hKeys[h] !== -1) h = (h + 1) & hMask;
+                hKeys[h] = uvKey;
+                hVals[h] = i;
+            }
+
+            const lookup = (uvKey: number): number => {
+                let h = hash(uvKey);
+                while (true) {
+                    const k = hKeys[h];
+                    if (k === uvKey) return hVals[h];
+                    if (k === -1) return -1;
+                    h = (h + 1) & hMask;
+                }
+            };
+
+            const visited = new Uint8Array(count);
+            const uvKeyOf = (u: number, v: number): number => u * coordStride + v;
+
+            for (let i = 0; i < count; i++) {
+                if (visited[i]) continue;
+                const uvKey = decodeUvKey(keys[groupStart + i]);
+                const u0 = Math.floor(uvKey / coordStride);
+                const v0 = uvKey % coordStride;
+
+                let width = 1;
+                while (true) {
+                    const idx = lookup(uvKeyOf(u0 + width, v0));
+                    if (idx === -1 || visited[idx]) break;
+                    width++;
+                }
+
+                let height = 1;
+                while (true) {
+                    let canGrow = true;
+                    for (let du = 0; du < width; du++) {
+                        const idx = lookup(uvKeyOf(u0 + du, v0 + height));
+                        if (idx === -1 || visited[idx]) {
+                            canGrow = false;
+                            break;
+                        }
+                    }
+                    if (!canGrow) break;
+                    height++;
+                }
+
+                for (let dv = 0; dv < height; dv++) {
+                    for (let du = 0; du < width; du++) {
+                        visited[lookup(uvKeyOf(u0 + du, v0 + dv))] = 1;
                     }
                 }
-                if (!canGrow) break;
-                height++;
+
+                addRect(bucket, p, u0, v0, u0 + width, v0 + height);
             }
 
-            for (let dv = 0; dv < height; dv++) {
-                for (let du = 0; du < width; du++) {
-                    visited[lookup(uvKeyOf(u0 + du, v0 + dv))] = 1;
-                }
-            }
-
-            addRect(bucket, p, u0, v0, u0 + width, v0 + height);
+            groupStart = groupEnd;
         }
-
-        groupStart = groupEnd;
     }
 
     const globalPoint = (
