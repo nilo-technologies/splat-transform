@@ -79,7 +79,7 @@ const palettizeColors = (linearColors: Float32Array, k: number): Float32Array =>
     centroids[1] = srgb[firstIdx * 3 + 1];
     centroids[2] = srgb[firstIdx * 3 + 2];
 
-    // minDist to distances from first centroid
+    // initialize minDist with distances from first centroid
     const minDist = new Float64Array(vertexCount);
     for (let v = 0; v < vertexCount; v++) {
         const dr = srgb[v * 3] - centroids[0];
