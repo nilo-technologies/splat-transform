@@ -1,0 +1,82 @@
+name: Release Tarball
+
+# Builds the package and attaches the packed .tgz to a GitHub Release, so
+# consumers (Nilo) can depend on a prebuilt tarball URL instead of a git ref.
+# Nothing is published to npm - this fork is consumed by release URL only,
+# mirroring how nilo-technologies/JoltPhysics.js ships to Nilo.
+#
+# Cut a release by pushing a tag, e.g.:
+#   npm version 2.7.1-nilo.2 --no-git-tag-version && git commit -am "..." \
+#     && git tag v2.7.1-nilo.2 && git push origin <branch> --tags
+# or run the workflow manually from the Actions tab against any branch.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+-nilo.[0-9]+"
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: Build and attach tarball
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          registry-url: "https://registry.npmjs.org/"
+
+      # `npm ci` requires the lockfile to match package.json. The manifest is
+      # patched relative to upstream (rename + webgpu demoted to optional), so
+      # fall back to `npm install` when the lockfile has drifted.
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify dist/ was produced
+        run: |
+          test -f dist/index.mjs
+          test -f dist/index.cjs
+          test -f dist/worker.mjs
+          test -f dist/lib/index.d.ts
+          test -f dist/lib/index.d.cts
+
+      - name: Pack tarball
+        id: pack
+        run: |
+          FILE=$(npm pack --silent | tail -n 1)
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+          echo "Packed $FILE"
+          tar -tzf "$FILE" | head -n 40
+
+      # Guards the actual failure mode this whole setup exists to prevent:
+      # a tarball that ships sources but no dist/.
+      - name: Verify tarball contains dist/
+        run: |
+          tar -tzf "${{ steps.pack.outputs.file }}" | grep -q '^package/dist/index.mjs$'
+          tar -tzf "${{ steps.pack.outputs.file }}" | grep -q '^package/dist/lib/index.d.ts$'
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.pack.outputs.file }}
+          generate_release_notes: true
+          prerelease: true
+
+      # On manual runs there is no tag to release against, so expose the
+      # tarball as a build artifact for inspection instead.
+      - name: Upload tarball as artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: splat-transform-tarball
+          path: ${{ steps.pack.outputs.file }}

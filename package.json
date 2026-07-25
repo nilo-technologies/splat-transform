@@ -1,6 +1,6 @@
 {
-  "name": "@playcanvas/splat-transform",
-  "version": "2.7.1",
+  "name": "@nilo-technologies/splat-transform",
+  "version": "2.7.1-nilo.1",
   "author": "PlayCanvas<support@playcanvas.com>",
   "homepage": "https://playcanvas.com",
   "description": "Library and CLI tool for 3D Gaussian splat format conversion and transformation",
@@ -34,11 +34,11 @@
     "splat-transform": "bin/cli.mjs"
   },
   "bugs": {
-    "url": "https://github.com/playcanvas/splat-transform/issues"
+    "url": "https://github.com/nilo-technologies/splat-transform/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/playcanvas/splat-transform.git"
+    "url": "git+https://github.com/nilo-technologies/splat-transform.git"
   },
   "files": [
     "dist/",
@@ -46,7 +46,9 @@
     "lib/"
   ],
   "dependencies": {
-    "@adobe/spz": "0.2.2",
+    "@adobe/spz": "0.2.2"
+  },
+  "optionalDependencies": {
     "webgpu": "0.4.0"
   },
   "devDependencies": {
@@ -76,6 +78,7 @@
   },
   "scripts": {
     "build": "rollup -c && node -e \"fs=require('fs');fs.copyFileSync('dist/lib/index.d.ts','dist/lib/index.d.cts')\"",
+    "prepare": "npm run build",
     "docs": "typedoc",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
