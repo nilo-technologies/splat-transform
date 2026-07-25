@@ -33,6 +33,7 @@ import {
     type ReadFileSystem,
     logger
 } from '../lib';
+import { MAX_COLOR_RADIUS } from '../lib/mesh/color-spatial';
 
 /**
  * CLI-specific options extending library options.
@@ -145,6 +146,8 @@ const cliOptionsConfig = {
     'collision-color': { type: 'string' },
     'collision-color-palette': { type: 'string' },
     'collision-color-flat': { type: 'boolean', default: false },
+    'collision-color-smooth': { type: 'string' },
+    'collision-color-coherent': { type: 'string' },
     'projection': { type: 'string' },
     'camera': { type: 'string' },
     'look-at': { type: 'string' },
@@ -415,6 +418,22 @@ const parseArguments = async () => {
             collisionColorPalette = undefined;
         }
     }
+
+    const parseColorRadius = (name: string, raw: string | undefined): number | undefined => {
+        if (raw === undefined) return undefined;
+        const radius = parseNumber(raw);
+        if (!(radius > 0) || radius > MAX_COLOR_RADIUS) {
+            throw new Error(`Invalid ${name} value: ${raw}. Must be > 0 and <= ${MAX_COLOR_RADIUS}.`);
+        }
+        if (collisionMesh === false || collisionMesh === 'faces' || collisionMesh === 'smooth') {
+            logger.warn(`--${name} only applies to voxel/tris collision meshes and will be ignored.`);
+            return undefined;
+        }
+        return radius;
+    };
+
+    const collisionColorSmooth = parseColorRadius('collision-color-smooth', v['collision-color-smooth']);
+    const collisionColorCoherent = parseColorRadius('collision-color-coherent', v['collision-color-coherent']);
     const spzVersion = parseInteger(v['spz-version']);
     if (spzVersion !== 3 && spzVersion !== 4) {
         throw new Error(`Invalid spz-version value: ${v['spz-version']}. Must be 3 or 4.`);
@@ -533,6 +552,8 @@ const parseArguments = async () => {
         collisionColorMode,
         collisionColorPalette,
         collisionColorFlat: v['collision-color-flat'],
+        collisionColorSmooth,
+        collisionColorCoherent,
         renderProjection,
         renderCameraPosition,
         renderLookAt,
@@ -832,6 +853,8 @@ VOXEL OUTPUT (.voxel.json)
         --collision-color    [average|solid]   Vertex color algorithm for voxel/tris collision meshes. solid snaps to the majority color instead of blending. Default: average
         --collision-color-palette   <n>   Quantize collision mesh vertex colors to an n-color palette. Default: off
         --collision-color-flat          Average each triangle's vertex colors for a uniform per-face flat colour. Default: false
+        --collision-color-smooth    <r>   Spatially average vertex colors within r voxels before quantizing, suppressing colour noise. Default: off
+        --collision-color-coherent  <r>   Snap each vertex to the dominant palette colour within r voxels, removing speckle. Default: off
 
 IMAGE OUTPUT (.webp) — lossless WebP rendered via GPU rasterizer
         --projection       <pinhole|equirect>  Camera projection. Default: pinhole.

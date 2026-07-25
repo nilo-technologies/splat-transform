@@ -78,6 +78,12 @@ type Options = {
     /** When true, average each triangle's vertex colors and assign the result to all three vertices, giving faces a uniform flat color. Default: false. */
     collisionColorFlat?: boolean;
 
+    /** Spatially average each vertex color with neighbours within this many voxels before building the palette, suppressing isolated color noise. Off by default. */
+    collisionColorSmooth?: number;
+
+    /** After palette assignment, snap each vertex to the dominant palette color within this many voxels, removing isolated speckle. Off by default. */
+    collisionColorCoherent?: number;
+
     /** Camera projection for image output: `'pinhole'` (default) or `'equirect'` (360°×180° panorama). */
     renderProjection?: 'pinhole' | 'equirect';
 

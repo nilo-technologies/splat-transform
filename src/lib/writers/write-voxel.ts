@@ -6,6 +6,7 @@ import { logWrittenFile } from './utils';
 import { Column, DataTable, computeGaussianExtents, computeWriteTransform, transformColumns, type Bounds } from '../data-table';
 import { GpuDilation, GpuVoxelization } from '../gpu';
 import { type FileSystem, writeFile } from '../io/write';
+import { MAX_COLOR_RADIUS } from '../mesh/color-spatial';
 import { GaussianBVH } from '../spatial';
 import type { CollisionColorMode, CollisionMeshShape, DeviceCreator } from '../types';
 import { fmtCount, logger, Transform } from '../utils';
@@ -67,6 +68,12 @@ type WriteVoxelOptions = {
 
     /** When true, average each triangle's vertex colors for a uniform per-face flat colour. Default: false. */
     collisionColorFlat?: boolean;
+
+    /** Spatially average each vertex color with neighbours within this many voxels before building the palette. Must be > 0 and <= 8. Default: off. */
+    collisionColorSmooth?: number;
+
+    /** After palette assignment, snap each vertex to the dominant palette color within this many voxels. Must be > 0 and <= 8. Default: off. */
+    collisionColorCoherent?: number;
 };
 
 /**
@@ -339,7 +346,9 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         collisionMesh = false,
         collisionColorMode = 'average',
         collisionColorPalette,
-        collisionColorFlat = false
+        collisionColorFlat = false,
+        collisionColorSmooth,
+        collisionColorCoherent
     } = options;
 
     if (!createDevice) {
@@ -357,6 +366,15 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
 
     if (collisionColorPalette !== undefined && (!Number.isInteger(collisionColorPalette) || collisionColorPalette < 1)) {
         throw new Error(`collisionColorPalette must be an integer >= 1, got ${collisionColorPalette}`);
+    }
+
+    for (const [name, value] of [
+        ['collisionColorSmooth', collisionColorSmooth],
+        ['collisionColorCoherent', collisionColorCoherent]
+    ] as const) {
+        if (value !== undefined && (!(value > 0) || value > MAX_COLOR_RADIUS)) {
+            throw new Error(`${name} must be > 0 and <= ${MAX_COLOR_RADIUS}, got ${value}`);
+        }
     }
 
     if (navCapsule && !navSeed) {
@@ -533,7 +551,9 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
             },
             mode: collisionColorMode,
             paletteK: collisionColorPalette,
-            flatShade: collisionColorFlat
+            flatShade: collisionColorFlat,
+            smoothRadius: collisionColorSmooth,
+            coherentRadius: collisionColorCoherent
         } : null;
 
         const glbBytes = collisionMeshShape ?

@@ -725,6 +725,39 @@ describe('buildCollisionMesh vertex colors', () => {
         assert.ok(trianglesChecked >= 8, `must check at least 8 triangles, got ${trianglesChecked}`);
         assert.ok(quadPairsChecked >= 4, `must check at least 4 quad pairs, got ${quadPairsChecked}`);
     });
+
+    it('should not exceed paletteK colours when flat-shading is also enabled', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        // Averaging a face that straddles two palette entries would invent a
+        // blend that is not in the palette, silently pushing the output well
+        // past the requested colour count.
+        for (const shape of ['voxel', 'tris']) {
+            const paletteK = 3;
+            const colorSource = makeSplatColorSource([
+                { center: [0, 0, 0], extent: 4, color: [1, 0, 0], logit: 0 },
+                { center: [4, 0, 0], extent: 4, color: [0, 1, 0], logit: 0 },
+                { center: [4, 4, 4], extent: 4, color: [0, 0, 1], logit: 0 }
+            ], 'average');
+            colorSource.paletteK = paletteK;
+            colorSource.flatShade = true;
+
+            const bytes = buildCollisionMesh(solidGrid(), bounds, 1.0, shape, colorSource);
+            assert.ok(bytes, `${shape} should produce GLB output`);
+
+            const { json, bin } = parseGlb(bytes);
+            const colorAccessor = json.accessors[2];
+            const colorView = json.bufferViews[2];
+            const colors = new Float32Array(
+                bin.buffer, bin.byteOffset + colorView.byteOffset, colorAccessor.count * 3);
+
+            const distinct = new Set();
+            for (let v = 0; v < colorAccessor.count; v++) {
+                distinct.add(`${colors[v * 3]},${colors[v * 3 + 1]},${colors[v * 3 + 2]}`);
+            }
+            assert.ok(distinct.size <= paletteK,
+                `${shape}: expected at most ${paletteK} colours, got ${distinct.size}`);
+        }
+    });
 });
 
 describe('coplanarMerge', () => {

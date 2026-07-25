@@ -242,6 +242,61 @@ describe('CLI parsing', () => {
         assert.doesNotMatch(result.stderr, /palette/i);
     });
 
+    it('rejects a collision colour radius outside (0, 8]', async () => {
+        for (const [flag, value] of [
+            ['--collision-color-smooth', '0'],
+            ['--collision-color-coherent', '9'],
+            ['--collision-color-smooth', 'notanumber']
+        ]) {
+            const result = await runCli([
+                '--gpu',
+                'cpu',
+                'test/fixtures/splat/minimal.splat',
+                '--collision-mesh',
+                'voxel',
+                flag,
+                value,
+                'null'
+            ]);
+
+            assert.notStrictEqual(result.code, 0, `CLI should reject ${flag} ${value}`);
+        }
+    });
+
+    it('warns and ignores collision colour radii without a coloured mesh', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-color-smooth',
+            '2',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+        assert.match(result.stderr, /--collision-color-smooth.*ignored/i);
+    });
+
+    it('accepts collision colour radii with a coloured mesh', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-mesh',
+            'voxel',
+            '--collision-color-palette',
+            '8',
+            '--collision-color-smooth',
+            '1',
+            '--collision-color-coherent',
+            '1.5',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+        assert.doesNotMatch(result.stderr, /ignored/i);
+    });
+
     it('accepts --collision-color-flat with a coloured mesh', async () => {
         const result = await runCli([
             '--gpu',

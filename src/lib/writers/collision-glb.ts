@@ -1,5 +1,5 @@
 import type { Bounds } from '../data-table';
-import { colorizeVertices, computeVertexNormals, coplanarMerge, marchingCubes, palettizeColors, voxelFaces, type Mesh, type SplatColorColumns } from '../mesh';
+import { colorizeVertices, computeVertexNormals, coplanarMerge, marchingCubes, palettizeColors, smoothVertexColors, voxelFaces, type Mesh, type SplatColorColumns } from '../mesh';
 import type { GaussianBVH } from '../spatial';
 import type { CollisionColorMode, CollisionMeshShape } from '../types';
 import { fmtCount, logger } from '../utils';
@@ -199,18 +199,78 @@ function encodeGlb(positions: Float32Array, indices: Uint32Array, colors?: Float
  * merging. `voxel` and `tris` also bake splat colors into a COLOR_0 vertex
  * attribute.
  * @param colorSource - Splat BVH, color columns, coloring mode, optional
- * palette quantisation, and optional flat-shade setting used to colorize
- * mesh vertices. Required for the `voxel` and `tris` shapes, ignored
- * otherwise.
+ * palette quantisation, optional spatial smooth/coherence radii, and optional
+ * flat-shade setting used to colorize mesh vertices. Required for the `voxel`
+ * and `tris` shapes, ignored otherwise.
  * @returns GLB bytes, or null if no triangles were generated
  * @throws Error if shape is `voxel` or `tris` and `colorSource` is null
  */
+/**
+ * Write one uniform colour for a face into `out`.
+ *
+ * Averaging is right for continuous vertex colours, but once colours have been
+ * quantized to a palette an average across a face straddling two entries is a
+ * blend that is not in the palette — so pick the face's dominant colour
+ * instead, keeping the output a strict subset of the palette. Ties go to the
+ * earliest vertex, which keeps the result deterministic.
+ *
+ * @param verts - Vertex indices making up the face (3 or 4).
+ * @param src - Per-vertex colour triplets.
+ * @param out - Destination colour array.
+ * @param outOff - Offset in `out` to write the triplet at.
+ * @param quantized - True when `src` holds palette colours.
+ */
+const writeFaceColor = (
+    verts: number[],
+    src: Float32Array,
+    out: Float32Array,
+    outOff: number,
+    quantized: boolean
+): void => {
+    if (quantized) {
+        let bestVert = verts[0];
+        let bestCount = 0;
+        for (const v of verts) {
+            let count = 0;
+            for (const w of verts) {
+                if (src[w * 3] === src[v * 3] &&
+                    src[w * 3 + 1] === src[v * 3 + 1] &&
+                    src[w * 3 + 2] === src[v * 3 + 2]) {
+                    count++;
+                }
+            }
+            if (count > bestCount) {
+                bestCount = count;
+                bestVert = v;
+            }
+        }
+        out[outOff] = src[bestVert * 3];
+        out[outOff + 1] = src[bestVert * 3 + 1];
+        out[outOff + 2] = src[bestVert * 3 + 2];
+        return;
+    }
+
+    for (let ch = 0; ch < 3; ch++) {
+        let sum = 0;
+        for (const v of verts) sum += src[v * 3 + ch];
+        out[outOff + ch] = sum / verts.length;
+    }
+};
+
 const buildCollisionMesh = (
     grid: SparseVoxelGrid,
     gridBounds: Bounds,
     voxelResolution: number,
     shape: CollisionMeshShape = 'smooth',
-    colorSource: { bvh: GaussianBVH; columns: SplatColorColumns; mode: CollisionColorMode; paletteK?: number; flatShade?: boolean } | null = null
+    colorSource: {
+        bvh: GaussianBVH;
+        columns: SplatColorColumns;
+        mode: CollisionColorMode;
+        paletteK?: number;
+        flatShade?: boolean;
+        smoothRadius?: number;
+        coherentRadius?: number;
+    } | null = null
 ): Uint8Array | null => {
     const g = logger.group('Collision mesh');
 
@@ -260,9 +320,23 @@ const buildCollisionMesh = (
         const normals = computeVertexNormals(finalMesh.positions, finalMesh.indices);
         colors = colorizeVertices(finalMesh.positions, normals, colorSource.bvh, colorSource.columns, voxelResolution, colorSource.mode);
 
-        if (colorSource.paletteK !== undefined && colorSource.paletteK >= 1) {
-            colors = palettizeColors(colors, colorSource.paletteK);
+        if (colorSource.smoothRadius !== undefined && colorSource.smoothRadius > 0) {
+            colors = smoothVertexColors(colors, finalMesh.positions, colorSource.smoothRadius, voxelResolution);
+            logger.info(`smoothed: ${colorSource.smoothRadius} voxel radius`);
+        }
+
+        const quantized = colorSource.paletteK !== undefined && colorSource.paletteK >= 1;
+
+        if (quantized) {
+            colors = palettizeColors(colors, colorSource.paletteK, {
+                positions: finalMesh.positions,
+                voxelResolution,
+                coherentRadius: colorSource.coherentRadius
+            });
             logger.info(`palette: ${colorSource.paletteK} colours`);
+            if (colorSource.coherentRadius !== undefined && colorSource.coherentRadius > 0) {
+                logger.info(`coherent: ${colorSource.coherentRadius} voxel radius`);
+            }
         }
 
         if (colorSource.flatShade) {
@@ -345,15 +419,14 @@ const buildCollisionMesh = (
                     }
                     visited[t] = 1;
 
-                    // per-channel average across the quad's vertices
+                    // one uniform colour across the quad's vertices
                     const vOff = t * 3;
                     const partnerOff = partner !== -1 ? partner * 3 : -1;
-                    for (let ch = 0; ch < 3; ch++) {
-                        let sum = 0;
-                        for (const v of allVerts) sum += colors[v * 3 + ch];
-                        const avg = sum / allVerts.length;
-                        quadColor[vOff + ch] = avg;
-                        if (partnerOff >= 0) quadColor[partnerOff + ch] = avg;
+                    writeFaceColor(allVerts, colors, quadColor, vOff, quantized);
+                    if (partnerOff >= 0) {
+                        quadColor[partnerOff] = quadColor[vOff];
+                        quadColor[partnerOff + 1] = quadColor[vOff + 1];
+                        quadColor[partnerOff + 2] = quadColor[vOff + 2];
                     }
                 }
 
@@ -378,17 +451,26 @@ const buildCollisionMesh = (
                     flatPositions[t * 9 + 6 + k] = finalMesh.positions[c * 3 + k];
                 }
 
-                // per-face uniform colour: for voxel the pre-computed quadColor array
-                // already holds the value at t*3; for tris average the 3 vertex
-                // colours
+                // per-face uniform colour: for voxel the pre-computed quadColor
+                // array already holds the value at t*3; for tris collapse the 3
+                // vertex colours
                 const tOff = t * 3;
+                const face = [0, 0, 0];
+                if (isVoxel) {
+                    face[0] = colors[tOff];
+                    face[1] = colors[tOff + 1];
+                    face[2] = colors[tOff + 2];
+                } else {
+                    const tmp = new Float32Array(3);
+                    writeFaceColor([a, b, c], colors, tmp, 0, quantized);
+                    face[0] = tmp[0];
+                    face[1] = tmp[1];
+                    face[2] = tmp[2];
+                }
                 for (let ch = 0; ch < 3; ch++) {
-                    const avg = isVoxel ?
-                        colors[tOff + ch] :
-                        (colors[a * 3 + ch] + colors[b * 3 + ch] + colors[c * 3 + ch]) / 3;
-                    flatColors[t * 9 + ch] = avg;
-                    flatColors[t * 9 + 3 + ch] = avg;
-                    flatColors[t * 9 + 6 + ch] = avg;
+                    flatColors[t * 9 + ch] = face[ch];
+                    flatColors[t * 9 + 3 + ch] = face[ch];
+                    flatColors[t * 9 + 6 + ch] = face[ch];
                 }
 
                 flatIndices[t * 3] = t * 3;
