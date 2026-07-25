@@ -37,6 +37,29 @@ const oklabToLinear = (L: number, A: number, B: number): [number, number, number
     ];
 };
 
+// ---------------------------------------------------------------------------
+// Tuning constants
+//
+// These trade colour fidelity against hue coverage, and they were calibrated
+// against a single reference asset: an outdoor diorama whose collision mesh is
+// ~92% red/orange by vertex count, with the remaining hues (olive foliage,
+// stone, and a few percent of saturated accents) spread thinly. A scene with a
+// very different colour balance is the useful next test — revisit these if
+// output on such a scene looks either washed towards one tone or speckled.
+//
+// How to re-measure, since none of this is obvious from the values alone:
+// export a mesh with `--collision-mesh voxel` and no palette to get the
+// reference colours, then compare quantized output against it on two axes —
+// how many distinct hue families survive, and mean per-vertex colour drift.
+// Coverage and drift pull in opposite directions; the settings below sit
+// deliberately towards coverage, per the feature's intent.
+//
+//   LIGHTNESS_WEIGHT     lower = more slots on hue, fewer on light/dark
+//   L/AB_BIN_STEP        candidate granularity; smaller = more, finer bins
+//   SUPPORT_*            what counts as a real region vs. scattered noise
+//   MAX_ITERS            refinement budget
+// ---------------------------------------------------------------------------
+
 // Lightness counts for less than chroma so palette slots are spent on hue
 // variety rather than on lighting: a same-material shadow-to-highlight swing
 // otherwise measures ~16x larger than a genuine cross-hue difference. Not
@@ -64,6 +87,9 @@ const SUPPORT_COLOR_EPS = 0.06;
 const SUPPORT_MIN_COUNT = 3;
 const SUPPORT_MIN_RATIO = 0.5;
 
+// Refinement stops early once no centroid moves, so the cap only bounds the
+// pathological case; it is generous because reseeding an emptied cluster can
+// perturb convergence late in the loop.
 const MAX_ITERS = 25;
 const CONVERGENCE_EPS2 = 1e-10;
 

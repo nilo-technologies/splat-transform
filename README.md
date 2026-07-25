@@ -242,6 +242,8 @@ Apply when writing `.voxel.json` (sparse voxel octree for collision detection). 
 
 The two spatial options are independent and both off by default: `--collision-color-smooth` cleans the colors *before* the palette is built, `--collision-color-coherent` cleans the assignment *after*. Radii are in voxels, so they scale with `--voxel-params` size. Start with `1` for either.
 
+Palette selection deliberately favours hue coverage over per-vertex colour accuracy, so a small strongly-coloured feature is kept rather than averaged away. That balance is set by a handful of tuning constants at the top of [`src/lib/mesh/palette.ts`](src/lib/mesh/palette.ts) — how far lightness is discounted against chroma (`LIGHTNESS_WEIGHT`), candidate colour granularity (`L_BIN_STEP` / `AB_BIN_STEP`), and what separates a real region from scattered noise (`SUPPORT_*`). They were calibrated against one reference scene that is ~92% warm by vertex count, so a scene with a very different colour balance may want different values; that file documents each constant and how to re-measure the coverage/drift trade-off.
+
 ## Image Output Options
 
 Apply when writing `.webp` (lossless WebP rendered via GPU rasterizer).
