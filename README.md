@@ -215,8 +215,32 @@ Apply when writing `.voxel.json` (sparse voxel octree for collision detection). 
                                           Default: height=1.6, radius=0.2
     --seed-pos         <x,y,z>          Seed position for voxel fill/carve and --filter-cluster.
                                           Default: 0,0,0
--K, --collision-mesh   [smooth|faces]   Generate collision mesh (.collision.glb). Default: smooth
+-K, --collision-mesh   [smooth|faces|voxel|tris]
+                                          Generate collision mesh (.collision.glb). voxel and tris additionally
+                                          bake splat colors into a COLOR_0 vertex attribute, using an unlit
+                                          material so the baked colors are not shaded again.
+                                          Default: smooth
+    --collision-color  [average|solid]  Vertex color algorithm for voxel/tris meshes. average blends the nearby
+                                          splats; solid takes an opacity-weighted median so each surface keeps
+                                          one flat color. Ignored for smooth/faces. Default: average
+    --collision-color-palette  <n>      Quantize vertex colors to at most n colors, then give each vertex its
+                                          nearest palette entry. The palette is chosen in Oklab with lightness
+                                          weighted below chroma, and only colors forming spatially coherent
+                                          regions can claim a slot — so small strongly-colored features survive
+                                          instead of collapsing into the dominant tone, and scattered color
+                                          noise cannot consume the budget. Default: off
+    --collision-color-flat              Give every face one uniform color instead of interpolating across it.
+                                          Combined with --collision-color-palette the face takes its dominant
+                                          palette entry, so the output never exceeds n colors. Default: false
+    --collision-color-smooth   <r>      Spatially average each vertex color with its neighbours within r voxels
+                                          (fractional allowed) before the palette is built. Suppresses isolated
+                                          color noise at the cost of softening color edges. Max 8. Default: off
+    --collision-color-coherent <r>      After palette assignment, snap each vertex to the dominant palette color
+                                          within r voxels. Removes leftover speckle while leaving palette
+                                          entries exact and color boundaries crisp. Max 8. Default: off
 ```
+
+The two spatial options are independent and both off by default: `--collision-color-smooth` cleans the colors *before* the palette is built, `--collision-color-coherent` cleans the assignment *after*. Radii are in voxels, so they scale with `--voxel-params` size. Start with `1` for either.
 
 ## Image Output Options
 
@@ -412,6 +436,14 @@ splat-transform --seed-pos 1,0,0 --voxel-carve 2.0,0.3 input.ply output.voxel.js
 
 # Watertight voxel-face collision mesh
 splat-transform -K faces input.ply output.voxel.json
+
+# Colored voxel collision mesh, quantized to a 16-color palette
+splat-transform -K voxel --collision-color-palette 16 input.ply output.voxel.json
+
+# Same, with flat per-voxel faces and both spatial passes enabled
+splat-transform -K voxel --collision-color solid --collision-color-flat \
+    --collision-color-palette 16 --collision-color-smooth 1 --collision-color-coherent 1 \
+    input.ply output.voxel.json
 ```
 
 ### Image Rendering
