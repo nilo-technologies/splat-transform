@@ -273,9 +273,36 @@ Generate docs with `npm run docs`. Published at https://api.playcanvas.com/splat
 
 ## Dependencies
 
-- **Runtime**: `webgpu` (for CLI GPU operations), `@adobe/spz` (SPZ format codec)
+- **Runtime**: `@adobe/spz` (SPZ format codec)
 - **Peer**: `playcanvas` (>=2.0.0) -- used for Vec3, GraphicsDevice, etc.
+- **Optional peer**: `webgpu` -- Node/Dawn bindings, ~68MB of native binaries.
+  Required only by the CLI (`src/cli/node-device.ts`), which is its sole
+  consumer and externalises it in the CLI bundle; the library bundles never
+  reference it. Declared optional so browser/library consumers do not pull it
+  in. It stays in `devDependencies` so the CLI works from a repo checkout; a
+  global CLI install needs `webgpu` installed alongside.
 - **Dev**: Rollup, TypeScript, ESLint, Typedoc, tsx (for running TypeScript tests)
+
+### Browser consumers and bundle size
+
+`write-html.ts` imports `html`, `css` and `js` from
+`@playcanvas/supersplat-viewer` and inlines the prebuilt viewer as string
+constants. Those strings get bundled (the viewer is not external), which is why
+`dist/index.mjs` is ~4.1MB. The blob does not tree-shake away through the
+generic `writeFile` dispatcher, because that dispatcher reaches every writer
+including `writeHtml`.
+
+Measured cost of a downstream Rollup build (`playcanvas` external) by entry point:
+
+| Imported from the package root | Bundled size |
+| --- | --- |
+| `writeSog` | 149 KB |
+| `readFile`, `DataTable` | 1.0 MB |
+| `writeHtml` | 3.3 MB |
+| `writeFile` (generic dispatcher) | 4.8 MB |
+
+Browser callers should import the specific reader/writer they need and avoid
+both `writeFile` and `writeHtml`, or they inherit the whole viewer bundle.
 
 ## Common Patterns
 
