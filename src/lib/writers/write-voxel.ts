@@ -1,7 +1,7 @@
 import { basename } from 'pathe';
 import { Vec3 } from 'playcanvas';
 
-import { buildCollisionMesh } from './collision-glb';
+import { buildCollisionOutputs } from './collision-glb';
 import { logWrittenFile } from './utils';
 import { Column, DataTable, computeGaussianExtents, computeWriteTransform, transformColumns, type Bounds } from '../data-table';
 import { GpuDilation, GpuVoxelization } from '../gpu';
@@ -74,6 +74,9 @@ type WriteVoxelOptions = {
 
     /** After palette assignment, snap each vertex to the dominant palette color within this many voxels. Must be > 0 and <= 8. Default: off. */
     collisionColorCoherent?: number;
+
+    /** Path to also write the collision voxels to as a MagicaVoxel `.vox` model. Requires a `voxel`/`tris` collision mesh. Default: off. */
+    collisionVoxels?: string;
 };
 
 /**
@@ -304,10 +307,11 @@ const writeOctreeFiles = async (
  * Voxelizes Gaussian splat data and writes the result as a sparse voxel octree.
  *
  * This function performs GPU-accelerated voxelization of Gaussian splat data
- * and outputs two or three files:
+ * and outputs two to four files:
  * - `filename` (.voxel.json) - JSON metadata including bounds, resolution, and array sizes
  * - Corresponding .voxel.bin - Binary octree data (nodes + leafData as Uint32 arrays)
  * - Corresponding .collision.glb - Triangle mesh extracted from the voxel output (GLB format, optional; the `voxel` and `tris` shapes include COLOR_0 vertex colors baked from the splats)
+ * - `collisionVoxels` (.vox) - The same voxels as a MagicaVoxel model, carrying the collision mesh colors (optional)
  *
  * The binary file layout is:
  * - Bytes 0 to (nodeCount * 4 - 1): nodes array (Uint32, little-endian)
@@ -348,7 +352,8 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         collisionColorPalette,
         collisionColorFlat = false,
         collisionColorSmooth,
-        collisionColorCoherent
+        collisionColorCoherent,
+        collisionVoxels
     } = options;
 
     if (!createDevice) {
@@ -556,9 +561,10 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
             coherentRadius: collisionColorCoherent
         } : null;
 
-        const glbBytes = collisionMeshShape ?
-            buildCollisionMesh(grid, gridBounds, voxelResolution, collisionMeshShape, colorSource) :
-            null;
+        const emitVox = collisionVoxels !== undefined && coloredCollisionMesh;
+        const { glb: glbBytes, vox: voxBytes } = collisionMeshShape ?
+            buildCollisionOutputs(grid, gridBounds, voxelResolution, collisionMeshShape, colorSource, { emitVox }) :
+            { glb: null, vox: null };
         bvh = null;
         pcDataTable = null;
 
@@ -581,6 +587,10 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
             const glbFilename = filename.replace('.voxel.json', '.collision.glb');
             await writeFile(fs, glbFilename, glbBytes);
             logWrittenFile(basename(glbFilename), glbBytes.length);
+        }
+        if (voxBytes && collisionVoxels) {
+            await writeFile(fs, collisionVoxels, voxBytes);
+            logWrittenFile(basename(collisionVoxels), voxBytes.length);
         }
         writingSub.end();
 

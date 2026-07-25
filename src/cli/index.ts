@@ -148,6 +148,7 @@ const cliOptionsConfig = {
     'collision-color-flat': { type: 'boolean', default: false },
     'collision-color-smooth': { type: 'string' },
     'collision-color-coherent': { type: 'string' },
+    'collision-voxels': { type: 'string' },
     'projection': { type: 'string' },
     'camera': { type: 'string' },
     'look-at': { type: 'string' },
@@ -434,6 +435,17 @@ const parseArguments = async () => {
 
     const collisionColorSmooth = parseColorRadius('collision-color-smooth', v['collision-color-smooth']);
     const collisionColorCoherent = parseColorRadius('collision-color-coherent', v['collision-color-coherent']);
+
+    let collisionVoxels: string | undefined = v['collision-voxels'];
+    if (collisionVoxels !== undefined) {
+        if (!collisionVoxels.toLowerCase().endsWith('.vox')) {
+            throw new Error(`Invalid collision-voxels value: ${collisionVoxels}. Must end in .vox`);
+        }
+        if (collisionMesh === false || collisionMesh === 'faces' || collisionMesh === 'smooth') {
+            logger.warn('--collision-voxels only applies to voxel/tris collision meshes and will be ignored.');
+            collisionVoxels = undefined;
+        }
+    }
     const spzVersion = parseInteger(v['spz-version']);
     if (spzVersion !== 3 && spzVersion !== 4) {
         throw new Error(`Invalid spz-version value: ${v['spz-version']}. Must be 3 or 4.`);
@@ -554,6 +566,7 @@ const parseArguments = async () => {
         collisionColorFlat: v['collision-color-flat'],
         collisionColorSmooth,
         collisionColorCoherent,
+        collisionVoxels,
         renderProjection,
         renderCameraPosition,
         renderLookAt,
@@ -855,6 +868,7 @@ VOXEL OUTPUT (.voxel.json)
         --collision-color-flat          Average each triangle's vertex colors for a uniform per-face flat colour. Default: false
         --collision-color-smooth    <r>   Spatially average vertex colors within r voxels before quantizing, suppressing colour noise. Default: off
         --collision-color-coherent  <r>   Snap each vertex to the dominant palette colour within r voxels, removing speckle. Default: off
+        --collision-voxels  <file.vox>    Also write the collision voxels as a MagicaVoxel .vox model, same colours as the mesh. Default: off
 
 IMAGE OUTPUT (.webp) — lossless WebP rendered via GPU rasterizer
         --projection       <pinhole|equirect>  Camera projection. Default: pinhole.

@@ -10,7 +10,7 @@ import { SparseVoxelGrid } from '../src/lib/voxel/sparse-voxel-grid.js';
 import { marchingCubes } from '../src/lib/mesh/marching-cubes.js';
 import { coplanarMerge } from '../src/lib/mesh/coplanar-merge.js';
 import { voxelFaces } from '../src/lib/mesh/voxel-faces.js';
-import { buildCollisionMesh } from '../src/lib/writers/collision-glb.js';
+import { buildCollisionMesh, buildCollisionOutputs } from '../src/lib/writers/collision-glb.js';
 
 // Linear block index: bx + by*nbx + bz*nbx*nby. The buffer stores blocks
 // keyed on this linear index now (not morton).
@@ -1469,5 +1469,154 @@ describe('coplanarMerge', () => {
         }
         assert.strictEqual(fabricated, 0,
             `merged mesh fabricated ${fabricated} vertex positions not present in raw input`);
+    });
+});
+
+const parseVox = (bytes) => {
+    const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const chunks = [];
+    const walk = (off, end) => {
+        while (off < end) {
+            const id = buf.toString('ascii', off, off + 4);
+            const contentSize = buf.readInt32LE(off + 4);
+            const childrenSize = buf.readInt32LE(off + 8);
+            const contentStart = off + 12;
+            chunks.push({ id, contentSize, childrenSize, contentStart });
+            if (childrenSize > 0) walk(contentStart + contentSize, contentStart + contentSize + childrenSize);
+            off = contentStart + contentSize + childrenSize;
+        }
+    };
+    walk(8, buf.length);
+    const size = chunks.find(c => c.id === 'SIZE');
+    const xyzi = chunks.find(c => c.id === 'XYZI');
+    const rgba = chunks.find(c => c.id === 'RGBA');
+    const numVoxels = buf.readInt32LE(xyzi.contentStart);
+    const voxels = [];
+    for (let i = 0; i < numVoxels; i++) {
+        const o = xyzi.contentStart + 4 + i * 4;
+        voxels.push([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
+    }
+    const palette = [];
+    for (let i = 0; i < 256; i++) {
+        const o = rgba.contentStart + i * 4;
+        palette.push([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
+    }
+    return {
+        magic: buf.toString('ascii', 0, 4),
+        version: buf.readInt32LE(4),
+        chunks,
+        dims: [
+            buf.readInt32LE(size.contentStart),
+            buf.readInt32LE(size.contentStart + 4),
+            buf.readInt32LE(size.contentStart + 8)
+        ],
+        voxels,
+        palette,
+        byteLength: buf.length
+    };
+};
+
+const linearToSrgb8 = (c) => {
+    const s = c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055;
+    return Math.min(255, Math.max(0, Math.round(s * 255)));
+};
+
+describe('buildCollisionOutputs vox', () => {
+    const voxColorSource = (paletteK) => {
+        const cs = makeSplatColorSource([
+            { center: [0, 0, 0], extent: 4, color: [1, 0, 0], logit: 0 },
+            { center: [4, 0, 0], extent: 4, color: [0, 1, 0], logit: 0 },
+            { center: [4, 4, 4], extent: 4, color: [0, 0, 1], logit: 0 }
+        ], 'average');
+        if (paletteK !== undefined) cs.paletteK = paletteK;
+        return cs;
+    };
+
+    it('should emit no vox unless asked for', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        const out = buildCollisionOutputs(solidGrid(), bounds, 1.0, 'voxel', voxColorSource(4));
+        assert.ok(out.glb, 'glb should still be produced');
+        assert.strictEqual(out.vox, null, 'vox must be opt-in');
+    });
+
+    it('should emit no vox for shapes that carry no colors', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        for (const shape of ['faces', 'smooth']) {
+            const out = buildCollisionOutputs(solidGrid(), bounds, 1.0, shape, null, { emitVox: true });
+            assert.strictEqual(out.vox, null, `${shape} has no colors so cannot produce a vox`);
+        }
+    });
+
+    it('should write a structurally valid vox model', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        const out = buildCollisionOutputs(solidGrid(), bounds, 1.0, 'voxel', voxColorSource(4), { emitVox: true });
+        assert.ok(out.vox, 'vox should be produced');
+
+        const vox = parseVox(out.vox);
+        assert.strictEqual(vox.magic, 'VOX ');
+        assert.strictEqual(vox.version, 150);
+        assert.deepStrictEqual(vox.chunks.map(c => c.id), ['MAIN', 'SIZE', 'XYZI', 'RGBA']);
+
+        // MAIN declares every following byte as its children
+        const main = vox.chunks[0];
+        assert.strictEqual(main.contentSize, 0);
+        assert.strictEqual(8 + 12 + main.childrenSize, vox.byteLength,
+            'declared chunk sizes must account for the whole file');
+
+        // the 4x4x4 solid block fills the grid
+        assert.deepStrictEqual(vox.dims, [4, 4, 4]);
+        assert.strictEqual(vox.voxels.length, 64);
+
+        for (const [x, y, z, idx] of vox.voxels) {
+            assert.ok(x < vox.dims[0] && y < vox.dims[1] && z < vox.dims[2],
+                `voxel ${x},${y},${z} outside declared size`);
+            // index 0 means empty, so a written voxel must never use it
+            assert.ok(idx >= 1 && idx <= 255, `palette index ${idx} out of range`);
+        }
+    });
+
+    it('should use the same colors the mesh was baked with', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        const paletteK = 3;
+        const out = buildCollisionOutputs(
+            solidGrid(), bounds, 1.0, 'voxel', voxColorSource(paletteK), { emitVox: true });
+
+        const { json, bin } = parseGlb(out.glb);
+        const colorAccessor = json.accessors[2];
+        const colorView = json.bufferViews[2];
+        const colors = new Float32Array(
+            bin.buffer, bin.byteOffset + colorView.byteOffset, colorAccessor.count * 3);
+        const meshColors = new Set();
+        for (let v = 0; v < colorAccessor.count; v++) {
+            meshColors.add([
+                linearToSrgb8(colors[v * 3]),
+                linearToSrgb8(colors[v * 3 + 1]),
+                linearToSrgb8(colors[v * 3 + 2])
+            ].join(','));
+        }
+
+        // resolve each voxel through the palette; index i reads slot i-1
+        const vox = parseVox(out.vox);
+        const used = new Set(vox.voxels.map(v => v[3]));
+        assert.ok(used.size <= paletteK, `expected at most ${paletteK} colors, got ${used.size}`);
+        for (const idx of used) {
+            const entry = vox.palette[idx - 1];
+            assert.strictEqual(entry[3], 255, 'used palette entries must be opaque');
+            assert.ok(meshColors.has(entry.slice(0, 3).join(',')),
+                `vox color ${entry.slice(0, 3)} is not one of the mesh colors`);
+        }
+    });
+
+    it('should reject a grid larger than the vox coordinate range', () => {
+        // XYZI stores coordinates as single bytes, so 256 per axis is the ceiling
+        const grid = new SparseVoxelGrid(260, 4, 4);
+        grid.setVoxel(0, 0, 0);
+        grid.setVoxel(259, 0, 0);
+        const bounds = makeGridBounds(0, 0, 0, 260, 4, 4);
+
+        assert.throws(
+            () => buildCollisionOutputs(grid, bounds, 1.0, 'voxel', voxColorSource(4), { emitVox: true }),
+            /exceeds the MagicaVoxel limit|260/,
+            'must explain the per-axis limit rather than emit a corrupt file');
     });
 });

@@ -1,6 +1,7 @@
 import type { Bounds } from '../data-table';
 import { colorizeVertices, computeVertexNormals, coplanarMerge, marchingCubes, palettizeColors, smoothVertexColors, voxelFaces, type Mesh, type SplatColorColumns } from '../mesh';
 import type { GaussianBVH } from '../spatial';
+import { buildCollisionVox } from './collision-vox';
 import type { CollisionColorMode, CollisionMeshShape } from '../types';
 import { fmtCount, logger } from '../utils';
 import { SparseVoxelGrid } from '../voxel/sparse-voxel-grid';
@@ -257,7 +258,7 @@ const writeFaceColor = (
     }
 };
 
-const buildCollisionMesh = (
+const buildCollisionOutputs = (
     grid: SparseVoxelGrid,
     gridBounds: Bounds,
     voxelResolution: number,
@@ -270,8 +271,9 @@ const buildCollisionMesh = (
         flatShade?: boolean;
         smoothRadius?: number;
         coherentRadius?: number;
-    } | null = null
-): Uint8Array | null => {
+    } | null = null,
+    opts: { emitVox?: boolean } = {}
+): { glb: Uint8Array | null; vox: Uint8Array | null } => {
     const g = logger.group('Collision mesh');
 
     const colored = shape === 'voxel' || shape === 'tris';
@@ -308,7 +310,7 @@ const buildCollisionMesh = (
     if (finalMesh.indices.length < 3) {
         logger.warn('no triangles generated, skipping GLB output');
         g.end();
-        return null;
+        return { glb: null, vox: null };
     }
 
     let colors: Float32Array | undefined;
@@ -487,8 +489,36 @@ const buildCollisionMesh = (
         colorSub.end();
     }
 
+    // built from the finished mesh and colours, so the .vox carries whatever
+    // the palette and spatial options produced for the GLB
+    const vox = opts.emitVox && colors ?
+        buildCollisionVox(grid, gridBounds, voxelResolution, finalMesh, colors) :
+        null;
+
     g.end();
-    return encodeGlb(finalMesh.positions, finalMesh.indices, colors);
+    return { glb: encodeGlb(finalMesh.positions, finalMesh.indices, colors), vox };
 };
 
-export { buildCollisionMesh };
+/**
+ * Extract a collision mesh from voxel data and encode it as a GLB file.
+ *
+ * Thin wrapper over `buildCollisionOutputs` for callers that only want the GLB.
+ *
+ * @param grid - Voxel grid after filtering / nav phases
+ * @param gridBounds - Grid bounds aligned to block boundaries
+ * @param voxelResolution - Size of each voxel in world units
+ * @param shape - Collision mesh shape to generate
+ * @param colorSource - Colour inputs; required for the `voxel` and `tris` shapes
+ * @returns GLB bytes, or null if no triangles were generated
+ */
+const buildCollisionMesh = (
+    grid: SparseVoxelGrid,
+    gridBounds: Bounds,
+    voxelResolution: number,
+    shape: CollisionMeshShape = 'smooth',
+    colorSource: Parameters<typeof buildCollisionOutputs>[4] = null
+): Uint8Array | null => {
+    return buildCollisionOutputs(grid, gridBounds, voxelResolution, shape, colorSource).glb;
+};
+
+export { buildCollisionMesh, buildCollisionOutputs };

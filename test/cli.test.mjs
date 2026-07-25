@@ -297,6 +297,56 @@ describe('CLI parsing', () => {
         assert.doesNotMatch(result.stderr, /ignored/i);
     });
 
+    it('rejects --collision-voxels without a .vox extension', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-mesh',
+            'voxel',
+            '--collision-voxels',
+            'model.magica',
+            'null'
+        ]);
+
+        assert.notStrictEqual(result.code, 0, 'CLI should reject a non-.vox filename');
+        assert.match(result.stderr, /\.vox/);
+    });
+
+    it('warns and ignores --collision-voxels without a coloured mesh', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-mesh',
+            'faces',
+            '--collision-voxels',
+            'model.vox',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+        assert.match(result.stderr, /--collision-voxels.*ignored/i);
+    });
+
+    it('accepts --collision-voxels with a coloured mesh', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-mesh',
+            'voxel',
+            '--collision-color-palette',
+            '16',
+            '--collision-voxels',
+            'model.vox',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+        assert.doesNotMatch(result.stderr, /ignored/i);
+    });
+
     it('accepts --collision-color-flat with a coloured mesh', async () => {
         const result = await runCli([
             '--gpu',

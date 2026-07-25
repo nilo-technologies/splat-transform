@@ -238,9 +238,14 @@ Apply when writing `.voxel.json` (sparse voxel octree for collision detection). 
     --collision-color-coherent <r>      After palette assignment, snap each vertex to the dominant palette color
                                           within r voxels. Removes leftover speckle while leaving palette
                                           entries exact and color boundaries crisp. Max 8. Default: off
+    --collision-voxels  <file.vox>      Also write the collision voxels as a MagicaVoxel .vox model, carrying
+                                          the same colors baked into the collision mesh. Requires a voxel/tris
+                                          collision mesh. Default: off
 ```
 
 The two spatial options are independent and both off by default: `--collision-color-smooth` cleans the colors *before* the palette is built, `--collision-color-coherent` cleans the assignment *after*. Radii are in voxels, so they scale with `--voxel-params` size. Start with `1` for either.
+
+`--collision-voxels` emits the same voxels the collision mesh was built from, so the `.vox` opens in MagicaVoxel looking like the `.glb` — every colour option above applies to both. Two format limits apply: a model spans at most 256 voxels per axis (raise the voxel size in `--voxel-params` if you hit it) and holds at most 255 colours, so a palette larger than that, or no palette at all, is reduced to 255 for the `.vox` only. Because a MagicaVoxel voxel carries one colour while a mesh voxel has up to six independently coloured faces, each voxel takes the colour held by most of its faces.
 
 Palette selection deliberately favours hue coverage over per-vertex colour accuracy, so a small strongly-coloured feature is kept rather than averaged away. That balance is set by a handful of tuning constants at the top of [`src/lib/mesh/palette.ts`](src/lib/mesh/palette.ts) — how far lightness is discounted against chroma (`LIGHTNESS_WEIGHT`), candidate colour granularity (`L_BIN_STEP` / `AB_BIN_STEP`), and what separates a real region from scattered noise (`SUPPORT_*`). They were calibrated against one reference scene that is ~92% warm by vertex count, so a scene with a very different colour balance may want different values; that file documents each constant and how to re-measure the coverage/drift trade-off.
 
@@ -389,7 +394,7 @@ splat-transform gen-grid.mjs -p width=10,height=10,scale=10,color=0.1 scenes/gri
 
 ### Voxel Format
 
-The voxel format stores sparse voxel octree data for collision detection. It consists of two files: `.voxel.json` (metadata) and `.voxel.bin` (binary octree data). Pass `-K` to also emit a `.collision.glb` mesh derived from the voxel grid.
+The voxel format stores sparse voxel octree data for collision detection. It consists of two files: `.voxel.json` (metadata) and `.voxel.bin` (binary octree data). Pass `-K` to also emit a `.collision.glb` mesh derived from the voxel grid, and `--collision-voxels` to additionally write those voxels as a MagicaVoxel `.vox` model.
 
 For a step-by-step walkthrough of each option (with illustrations), see the [Collision Mesh Guide](https://developer.playcanvas.com/user-manual/splat-transform/collision/).
 
@@ -445,6 +450,12 @@ splat-transform -K voxel --collision-color-palette 16 input.ply output.voxel.jso
 # Same, with flat per-voxel faces and both spatial passes enabled
 splat-transform -K voxel --collision-color solid --collision-color-flat \
     --collision-color-palette 16 --collision-color-smooth 1 --collision-color-coherent 1 \
+    input.ply output.voxel.json
+
+# Also emit a MagicaVoxel model of the same voxels and colors
+splat-transform -K voxel --collision-color solid --collision-color-flat \
+    --collision-color-palette 16 --collision-color-coherent 1 \
+    --collision-voxels output.vox \
     input.ply output.voxel.json
 ```
 
