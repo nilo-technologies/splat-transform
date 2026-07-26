@@ -30,10 +30,12 @@ import {
     type Options as LibOptions,
     type CollisionMeshShape,
     type CollisionColorMode,
+    type CollisionColorPalette,
     type ReadFileSystem,
     logger
 } from '../lib';
 import { MAX_COLOR_RADIUS } from '../lib/mesh/color-spatial';
+import { parsePaletteColors } from '../lib/mesh/palette';
 
 /**
  * CLI-specific options extending library options.
@@ -302,6 +304,27 @@ const parseArguments = async () => {
         throw new Error(`Invalid collision color mode: ${value}. Expected average or solid.`);
     };
 
+    // Either a colour count or an explicit list of colours. A `#` (or a comma,
+    // since a count never contains one) marks the value as a list, so
+    // `--collision-color-palette '#3243aa,4444ff'` fixes the palette instead of
+    // choosing one.
+    const parseCollisionColorPalette = (value: string): CollisionColorPalette => {
+        const forms = 'Expected a colour count (e.g. 16) or a comma-separated list of hex colours (e.g. \'#3243aa,4444ff\').';
+        if (value.includes('#') || value.includes(',')) {
+            const specs = value.split(',').map(s => s.trim()).filter(s => s.length > 0);
+            if (specs.length === 0) {
+                throw new Error(`Invalid collision-color-palette value: ${value}. ${forms}`);
+            }
+            parsePaletteColors(specs);
+            return specs;
+        }
+        const count = Number(value);
+        if (!Number.isInteger(count) || count < 1) {
+            throw new Error(`Invalid collision-color-palette value: ${value}. Must be an integer >= 1. ${forms}`);
+        }
+        return count;
+    };
+
     const parseComparator = (value: string): 'lt' | 'lte' | 'gt' | 'gte' | 'eq' | 'neq' => {
         switch (value) {
             case 'lt': return 'lt';
@@ -408,12 +431,9 @@ const parseArguments = async () => {
         collisionColorMode = undefined;
     }
 
-    let collisionColorPalette: number | undefined;
+    let collisionColorPalette: CollisionColorPalette | undefined;
     if (v['collision-color-palette'] !== undefined) {
-        collisionColorPalette = parseInteger(v['collision-color-palette']);
-        if (collisionColorPalette < 1) {
-            throw new Error(`Invalid collision-color-palette value: ${v['collision-color-palette']}. Must be >= 1.`);
-        }
+        collisionColorPalette = parseCollisionColorPalette(v['collision-color-palette']);
         if (collisionMesh === false || collisionMesh === 'faces' || collisionMesh === 'smooth') {
             logger.warn('--collision-color-palette only applies to voxel/tris collision meshes and will be ignored.');
             collisionColorPalette = undefined;
@@ -864,7 +884,7 @@ VOXEL OUTPUT (.voxel.json)
         --seed-pos         <x,y,z>          Seed position for voxel processing and --filter-cluster. Default: 0,0,0
     -K, --collision-mesh   [smooth|faces|voxel|tris]   Generate collision mesh (.collision.glb). voxel/tris add per-vertex colors. Default shape: smooth
         --collision-color    [average|solid]   Vertex color algorithm for voxel/tris collision meshes. solid snaps to the majority color instead of blending. Default: average
-        --collision-color-palette   <n>   Quantize collision mesh vertex colors to an n-color palette. Default: off
+        --collision-color-palette   <n|colors>   Quantize collision mesh vertex colors to an n-color palette, or to a comma-separated list of hex colors (e.g. '#3243aa,4444ff' — quote it, as an unquoted # starts a shell comment). Default: off
         --collision-color-flat          Average each triangle's vertex colors for a uniform per-face flat colour. Default: false
         --collision-color-smooth    <r>   Spatially average vertex colors within r voxels before quantizing, suppressing colour noise. Default: off
         --collision-color-coherent  <r>   Snap each vertex to the dominant palette colour within r voxels, removing speckle. Default: off

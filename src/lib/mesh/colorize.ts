@@ -217,5 +217,5 @@ const colorizeVertices = (
     return result;
 };
 
-export { colorizeVertices };
+export { colorizeVertices, srgbToLinear };
 export type { SplatColorColumns };

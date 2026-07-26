@@ -650,10 +650,10 @@ describe('buildCollisionMesh vertex colors', () => {
         }
     });
 
-    it('should quantize vertex colors to a palette when paletteK is set', () => {
+    it('should quantize vertex colors to a palette when a colour count is set', () => {
         const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
         const colorSource = makeSingleSplatColorSource(2, 2, 2, 4, [0.8, 0.2, 0.5], 0);
-        colorSource.paletteK = 1;
+        colorSource.palette = 1;
 
         const bytes = buildCollisionMesh(solidGrid(), bounds, 1.0, 'voxel', colorSource);
         assert.ok(bytes, 'voxel should produce GLB output');
@@ -673,6 +673,38 @@ describe('buildCollisionMesh vertex colors', () => {
                 assert.strictEqual(colors[i * 3 + c], ref[c],
                     `vertex ${i} channel ${c}: all vertices must be identical with k=1`);
             }
+        }
+    });
+
+    it('should stick to a fixed palette when one is given', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        // three splats of colours nowhere near the palette, so the output can
+        // only match if every vertex was snapped to a supplied entry
+        const colorSource = makeSplatColorSource([
+            { center: [0, 0, 0], extent: 4, color: [1, 0, 0], logit: 0 },
+            { center: [4, 0, 0], extent: 4, color: [0, 1, 0], logit: 0 },
+            { center: [4, 4, 4], extent: 4, color: [0, 0, 1], logit: 0 }
+        ], 'average');
+        colorSource.palette = ['#3243aa', '4444ff'];
+
+        const bytes = buildCollisionMesh(solidGrid(), bounds, 1.0, 'voxel', colorSource);
+        assert.ok(bytes, 'voxel should produce GLB output');
+
+        const { json, bin } = parseGlb(bytes);
+        const colorAccessor = json.accessors[2];
+        const colorView = json.bufferViews[2];
+        const colors = new Float32Array(
+            bin.buffer, bin.byteOffset + colorView.byteOffset, colorAccessor.count * 3);
+
+        // linear-space values of the two requested sRGB colours
+        const toLinear = c => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+        const entries = [[0x32, 0x43, 0xaa], [0x44, 0x44, 0xff]]
+            .map(e => e.map(b => Math.fround(toLinear(b / 255))));
+
+        for (let v = 0; v < colorAccessor.count; v++) {
+            const c = [colors[v * 3], colors[v * 3 + 1], colors[v * 3 + 2]];
+            const match = entries.some(e => e.every((ch, i) => Math.abs(ch - c[i]) < 1e-6));
+            assert.ok(match, `vertex ${v} colour ${c} is not one of the requested palette colours`);
         }
     });
 
@@ -726,7 +758,7 @@ describe('buildCollisionMesh vertex colors', () => {
         assert.ok(quadPairsChecked >= 4, `must check at least 4 quad pairs, got ${quadPairsChecked}`);
     });
 
-    it('should not exceed paletteK colours when flat-shading is also enabled', () => {
+    it('should not exceed the palette colour count when flat-shading is also enabled', () => {
         const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
         // Averaging a face that straddles two palette entries would invent a
         // blend that is not in the palette, silently pushing the output well
@@ -738,7 +770,7 @@ describe('buildCollisionMesh vertex colors', () => {
                 { center: [4, 0, 0], extent: 4, color: [0, 1, 0], logit: 0 },
                 { center: [4, 4, 4], extent: 4, color: [0, 0, 1], logit: 0 }
             ], 'average');
-            colorSource.paletteK = paletteK;
+            colorSource.palette = paletteK;
             colorSource.flatShade = true;
 
             const bytes = buildCollisionMesh(solidGrid(), bounds, 1.0, shape, colorSource);
@@ -1528,7 +1560,7 @@ describe('buildCollisionOutputs vox', () => {
             { center: [4, 0, 0], extent: 4, color: [0, 1, 0], logit: 0 },
             { center: [4, 4, 4], extent: 4, color: [0, 0, 1], logit: 0 }
         ], 'average');
-        if (paletteK !== undefined) cs.paletteK = paletteK;
+        if (paletteK !== undefined) cs.palette = paletteK;
         return cs;
     };
 

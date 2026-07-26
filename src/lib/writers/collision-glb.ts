@@ -1,8 +1,8 @@
 import type { Bounds } from '../data-table';
-import { colorizeVertices, computeVertexNormals, coplanarMerge, marchingCubes, palettizeColors, smoothVertexColors, voxelFaces, type Mesh, type SplatColorColumns } from '../mesh';
+import { colorizeVertices, computeVertexNormals, coplanarMerge, mapToPalette, marchingCubes, palettizeColors, parsePaletteColors, smoothVertexColors, voxelFaces, type Mesh, type SplatColorColumns } from '../mesh';
 import type { GaussianBVH } from '../spatial';
 import { buildCollisionVox } from './collision-vox';
-import type { CollisionColorMode, CollisionMeshShape } from '../types';
+import type { CollisionColorMode, CollisionColorPalette, CollisionMeshShape } from '../types';
 import { fmtCount, logger } from '../utils';
 import { SparseVoxelGrid } from '../voxel/sparse-voxel-grid';
 
@@ -267,7 +267,7 @@ const buildCollisionOutputs = (
         bvh: GaussianBVH;
         columns: SplatColorColumns;
         mode: CollisionColorMode;
-        paletteK?: number;
+        palette?: CollisionColorPalette;
         flatShade?: boolean;
         smoothRadius?: number;
         coherentRadius?: number;
@@ -327,18 +327,28 @@ const buildCollisionOutputs = (
             logger.info(`smoothed: ${colorSource.smoothRadius} voxel radius`);
         }
 
-        const quantized = colorSource.paletteK !== undefined && colorSource.paletteK >= 1;
+        const palette = colorSource.palette;
+        const paletteOpts = {
+            positions: finalMesh.positions,
+            voxelResolution,
+            coherentRadius: colorSource.coherentRadius
+        };
 
-        if (quantized) {
-            colors = palettizeColors(colors, colorSource.paletteK, {
-                positions: finalMesh.positions,
-                voxelResolution,
-                coherentRadius: colorSource.coherentRadius
-            });
-            logger.info(`palette: ${colorSource.paletteK} colours`);
-            if (colorSource.coherentRadius !== undefined && colorSource.coherentRadius > 0) {
-                logger.info(`coherent: ${colorSource.coherentRadius} voxel radius`);
-            }
+        let quantized = false;
+        if (Array.isArray(palette) && palette.length >= 1) {
+            // fixed palette: the colours are given, so there is nothing to
+            // cluster — every vertex just takes its nearest entry
+            colors = mapToPalette(colors, parsePaletteColors(palette), paletteOpts);
+            logger.info(`palette: ${palette.length} fixed colours`);
+            quantized = true;
+        } else if (typeof palette === 'number' && palette >= 1) {
+            colors = palettizeColors(colors, palette, paletteOpts);
+            logger.info(`palette: ${palette} colours`);
+            quantized = true;
+        }
+
+        if (quantized && colorSource.coherentRadius !== undefined && colorSource.coherentRadius > 0) {
+            logger.info(`coherent: ${colorSource.coherentRadius} voxel radius`);
         }
 
         if (colorSource.flatShade) {

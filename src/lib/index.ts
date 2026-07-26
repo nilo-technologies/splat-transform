@@ -62,7 +62,7 @@ export { carve, fillExterior, fillFloor, filterCluster, filterFloaters, findClus
 export type { NavSeed, NavSimplifyResult } from './voxel';
 
 // Types
-export type { CollisionMeshShape, CollisionColorMode, Options, Param, DeviceCreator } from './types';
+export type { CollisionMeshShape, CollisionColorMode, CollisionColorPalette, Options, Param, DeviceCreator } from './types';
 
 // Version
 export { version, revision } from './version';

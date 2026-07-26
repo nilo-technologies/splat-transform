@@ -7,8 +7,9 @@ import { Column, DataTable, computeGaussianExtents, computeWriteTransform, trans
 import { GpuDilation, GpuVoxelization } from '../gpu';
 import { type FileSystem, writeFile } from '../io/write';
 import { MAX_COLOR_RADIUS } from '../mesh/color-spatial';
+import { parsePaletteColors } from '../mesh/palette';
 import { GaussianBVH } from '../spatial';
-import type { CollisionColorMode, CollisionMeshShape, DeviceCreator } from '../types';
+import type { CollisionColorMode, CollisionColorPalette, CollisionMeshShape, DeviceCreator } from '../types';
 import { fmtCount, logger, Transform } from '../utils';
 import { version } from '../version';
 import { buildSparseOctree, type SparseOctree } from './sparse-octree';
@@ -63,8 +64,8 @@ type WriteVoxelOptions = {
     /** Vertex color algorithm for `voxel`/`tris` collision meshes. Ignored for grey shapes. Default: `'average'` */
     collisionColorMode?: CollisionColorMode;
 
-    /** Quantize collision-mesh vertex colors to a k-means palette of this many colors. Must be an integer >= 1. Default: off. */
-    collisionColorPalette?: number;
+    /** Quantize collision-mesh vertex colors. A number builds a k-means palette of that many colors (integer >= 1); a non-empty list of sRGB hex colors (e.g. `['#3243aa', '4444ff']`) snaps colors to exactly those instead. Default: off. */
+    collisionColorPalette?: CollisionColorPalette;
 
     /** When true, average each triangle's vertex colors for a uniform per-face flat colour. Default: false. */
     collisionColorFlat?: boolean;
@@ -369,8 +370,15 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
     })();
     const coloredCollisionMesh = collisionMeshShape === 'voxel' || collisionMeshShape === 'tris';
 
-    if (collisionColorPalette !== undefined && (!Number.isInteger(collisionColorPalette) || collisionColorPalette < 1)) {
-        throw new Error(`collisionColorPalette must be an integer >= 1, got ${collisionColorPalette}`);
+    if (Array.isArray(collisionColorPalette)) {
+        if (collisionColorPalette.length === 0) {
+            throw new Error('collisionColorPalette must list at least one colour');
+        }
+        // throws on a malformed entry, so a bad colour fails before voxelizing
+        parsePaletteColors(collisionColorPalette);
+    } else if (collisionColorPalette !== undefined &&
+        (!Number.isInteger(collisionColorPalette) || collisionColorPalette < 1)) {
+        throw new Error(`collisionColorPalette must be an integer >= 1 or a list of hex colours, got ${collisionColorPalette}`);
     }
 
     for (const [name, value] of [
@@ -555,7 +563,7 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
                 opacity: pcDataTable!.getColumnByName('opacity')!.data
             },
             mode: collisionColorMode,
-            paletteK: collisionColorPalette,
+            palette: collisionColorPalette,
             flatShade: collisionColorFlat,
             smoothRadius: collisionColorSmooth,
             coherentRadius: collisionColorCoherent

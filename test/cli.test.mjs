@@ -242,6 +242,38 @@ describe('CLI parsing', () => {
         assert.doesNotMatch(result.stderr, /palette/i);
     });
 
+    it('accepts a hex colour list for --collision-color-palette', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-mesh',
+            'voxel',
+            '--collision-color-palette',
+            '#3243aa,4444ff',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+    });
+
+    it('rejects --collision-color-palette with a malformed hex colour', async () => {
+        for (const value of ['#3243aa,nothex', '#12345', '#']) {
+            const result = await runCli([
+                '--gpu',
+                'cpu',
+                'test/fixtures/splat/minimal.splat',
+                '--collision-mesh',
+                'voxel',
+                '--collision-color-palette',
+                value,
+                'null'
+            ]);
+
+            assert.notStrictEqual(result.code, 0, `CLI should reject palette value ${value}`);
+        }
+    });
+
     it('rejects a collision colour radius outside (0, 8]', async () => {
         for (const [flag, value] of [
             ['--collision-color-smooth', '0'],

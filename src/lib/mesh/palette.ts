@@ -1,4 +1,5 @@
 import { buildVertexHash, forEachNeighbor, majorityFilterIndices } from './color-spatial';
+import { srgbToLinear } from './colorize';
 
 // Oklab (Björn Ottosson). Converts natively from linear RGB, so no gamma
 // round-trip is needed for clustering.
@@ -301,6 +302,127 @@ const assignNearest = (
 };
 
 /**
+ * Give every vertex the palette entry nearest its colour, optionally smoothing
+ * the result with a spatial majority filter.
+ *
+ * @param oklab - Per-vertex Oklab triplets.
+ * @param vertexCount - Number of vertices.
+ * @param centroids - Palette entries in Oklab, used for the nearest lookup.
+ * @param palette - The same entries in linear RGB, written to the output.
+ * @param opts - Optional spatial behaviour.
+ * @returns Linear-space quantized colours, three per vertex.
+ */
+const applyPalette = (
+    oklab: Float32Array,
+    vertexCount: number,
+    centroids: number[][],
+    palette: number[][],
+    opts?: PalettizeOptions
+): Float32Array => {
+    const assignments = new Uint32Array(vertexCount);
+    assignNearest(oklab, vertexCount, centroids, assignments);
+
+    let finalAssignments: Uint32Array<ArrayBufferLike> = assignments;
+    const positions = opts?.positions;
+    const voxelResolution = opts?.voxelResolution;
+    const coherentRadius = opts?.coherentRadius;
+    if (coherentRadius !== undefined && coherentRadius > 0 && positions && voxelResolution !== undefined) {
+        finalAssignments = majorityFilterIndices(
+            assignments, centroids.length, positions, coherentRadius, voxelResolution
+        );
+    }
+
+    const result = new Float32Array(vertexCount * 3);
+    for (let v = 0; v < vertexCount; v++) {
+        const entry = palette[finalAssignments[v]];
+        result[v * 3] = entry[0];
+        result[v * 3 + 1] = entry[1];
+        result[v * 3 + 2] = entry[2];
+    }
+
+    return result;
+};
+
+const toOklabArray = (linearColors: Float32Array): Float32Array => {
+    const oklab = new Float32Array(linearColors.length);
+    for (let v = 0; v < linearColors.length / 3; v++) {
+        const [L, A, B] = linearToOklab(linearColors[v * 3], linearColors[v * 3 + 1], linearColors[v * 3 + 2]);
+        oklab[v * 3] = L;
+        oklab[v * 3 + 1] = A;
+        oklab[v * 3 + 2] = B;
+    }
+    return oklab;
+};
+
+// `#rgb` / `#rrggbb`, with the hash optional so a comma-separated list only
+// needs one to mark itself as colours rather than a count.
+const HEX_COLOR = /^#?(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+
+/**
+ * Convert sRGB hex colour specs into the linear-space triplets the colour
+ * pipeline works in.
+ *
+ * @param specs - Hex colours, e.g. `['#3243aa', '4444ff']`. Both `#rgb` and
+ * `#rrggbb` are accepted, with or without the leading hash.
+ * @returns Linear-space RGB triplets, three entries per colour.
+ * @throws If the list is empty or any entry is not a hex colour.
+ */
+const parsePaletteColors = (specs: string[]): Float32Array => {
+    if (specs.length === 0) {
+        throw new Error('palette colour list is empty');
+    }
+
+    const out = new Float32Array(specs.length * 3);
+    for (let i = 0; i < specs.length; i++) {
+        const spec = specs[i].trim();
+        if (!HEX_COLOR.test(spec)) {
+            throw new Error(`Invalid palette colour: ${specs[i]}. Expected a hex colour such as '#3243aa'.`);
+        }
+        const digits = spec.replace('#', '');
+        const short = digits.length === 3;
+        for (let ch = 0; ch < 3; ch++) {
+            const hex = short ? digits[ch].repeat(2) : digits.slice(ch * 2, ch * 2 + 2);
+            out[i * 3 + ch] = srgbToLinear(parseInt(hex, 16) / 255);
+        }
+    }
+
+    return out;
+};
+
+/**
+ * Snap vertex colours to a fixed palette supplied by the caller.
+ *
+ * Unlike `palettizeColors` nothing is clustered: the entries are given, so each
+ * vertex simply takes its nearest one under the same lightness-weighted Oklab
+ * metric, and output colours match the requested ones exactly. `coherentRadius`
+ * still applies, since speckle removal is independent of how the palette was
+ * chosen.
+ *
+ * @param linearColors - Per-vertex linear-space RGB triplets.
+ * @param palette - Palette entries as linear-space RGB triplets, from
+ * `parsePaletteColors`.
+ * @param opts - Optional spatial behaviour.
+ * @returns Linear-space quantized colours, same length as `linearColors`.
+ */
+const mapToPalette = (linearColors: Float32Array, palette: Float32Array, opts?: PalettizeOptions): Float32Array => {
+    const entryCount = palette.length / 3;
+    if (entryCount < 1) {
+        throw new Error('mapToPalette requires at least one palette colour');
+    }
+
+    const vertexCount = linearColors.length / 3;
+    const entries: number[][] = [];
+    const centroids: number[][] = [];
+    for (let e = 0; e < entryCount; e++) {
+        const [r, g, b] = [palette[e * 3], palette[e * 3 + 1], palette[e * 3 + 2]];
+        entries.push([r, g, b]);
+        centroids.push(linearToOklab(r, g, b));
+    }
+
+    return applyPalette(toOklabArray(linearColors), vertexCount, centroids, entries, opts);
+};
+
+/**
  * Snap vertex colours to a deterministic palette of at most `k` colours.
  *
  * Clustering happens in Oklab with lightness weighted below chroma, so slots
@@ -328,18 +450,11 @@ const palettizeColors = (linearColors: Float32Array, k: number, opts?: Palettize
         return new Float32Array(linearColors);
     }
 
-    const oklab = new Float32Array(linearColors.length);
-    for (let v = 0; v < vertexCount; v++) {
-        const [L, A, B] = linearToOklab(linearColors[v * 3], linearColors[v * 3 + 1], linearColors[v * 3 + 2]);
-        oklab[v * 3] = L;
-        oklab[v * 3 + 1] = A;
-        oklab[v * 3 + 2] = B;
-    }
-
-    const result = new Float32Array(linearColors.length);
+    const oklab = toOklabArray(linearColors);
 
     if (effK < 2) {
         // single-colour palette: snap every vertex to the global mean
+        const result = new Float32Array(linearColors.length);
         let sumL = 0, sumA = 0, sumB = 0;
         for (let v = 0; v < vertexCount; v++) {
             sumL += oklab[v * 3];
@@ -438,27 +553,10 @@ const palettizeColors = (linearColors: Float32Array, k: number, opts?: Palettize
     }
 
     // final pass, so every vertex really does get its nearest palette entry
-    const assignments = new Uint32Array(vertexCount);
-    assignNearest(oklab, vertexCount, centroids, assignments);
-
-    let finalAssignments: Uint32Array<ArrayBufferLike> = assignments;
-    const coherentRadius = opts?.coherentRadius;
-    if (coherentRadius !== undefined && coherentRadius > 0 && positions && voxelResolution !== undefined) {
-        finalAssignments = majorityFilterIndices(
-            assignments, centroids.length, positions, coherentRadius, voxelResolution
-        );
-    }
-
-    const palette = centroids.map(c => oklabToLinear(c[0], c[1], c[2]));
-    for (let v = 0; v < vertexCount; v++) {
-        const entry = palette[finalAssignments[v]];
-        result[v * 3] = entry[0];
-        result[v * 3 + 1] = entry[1];
-        result[v * 3 + 2] = entry[2];
-    }
-
-    return result;
+    return applyPalette(
+        oklab, vertexCount, centroids, centroids.map(c => oklabToLinear(c[0], c[1], c[2])), opts
+    );
 };
 
-export { palettizeColors };
+export { palettizeColors, mapToPalette, parsePaletteColors };
 export type { PalettizeOptions };

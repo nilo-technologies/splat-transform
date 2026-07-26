@@ -223,15 +223,21 @@ Apply when writing `.voxel.json` (sparse voxel octree for collision detection). 
     --collision-color  [average|solid]  Vertex color algorithm for voxel/tris meshes. average blends the nearby
                                           splats; solid takes an opacity-weighted median so each surface keeps
                                           one flat color. Ignored for smooth/faces. Default: average
-    --collision-color-palette  <n>      Quantize vertex colors to at most n colors, then give each vertex its
+    --collision-color-palette  <n|colors>
+                                          Quantize vertex colors to at most n colors, then give each vertex its
                                           nearest palette entry. The palette is chosen in Oklab with lightness
                                           weighted below chroma, and only colors forming spatially coherent
                                           regions can claim a slot — so small strongly-colored features survive
                                           instead of collapsing into the dominant tone, and scattered color
-                                          noise cannot consume the budget. Default: off
+                                          noise cannot consume the budget.
+                                          Given a comma-separated list of hex colors instead ('#3243aa,4444ff',
+                                          #rgb or #rrggbb, the hash only needed on the first), palette selection
+                                          is skipped and every vertex snaps to its nearest listed color, which
+                                          the output then matches exactly. Quote the value — an unquoted # starts
+                                          a shell comment. Default: off
     --collision-color-flat              Give every face one uniform color instead of interpolating across it.
                                           Combined with --collision-color-palette the face takes its dominant
-                                          palette entry, so the output never exceeds n colors. Default: false
+                                          palette entry, so the output never exceeds the palette. Default: false
     --collision-color-smooth   <r>      Spatially average each vertex color with its neighbours within r voxels
                                           (fractional allowed) before the palette is built. Suppresses isolated
                                           color noise at the cost of softening color edges. Max 8. Default: off
@@ -446,6 +452,9 @@ splat-transform -K faces input.ply output.voxel.json
 
 # Colored voxel collision mesh, quantized to a 16-color palette
 splat-transform -K voxel --collision-color-palette 16 input.ply output.voxel.json
+
+# Restricted to an explicit palette instead of one chosen from the scene
+splat-transform -K voxel --collision-color-palette '#3243aa,4444ff' input.ply output.voxel.json
 
 # Same, with flat per-voxel faces and both spatial passes enabled
 splat-transform -K voxel --collision-color solid --collision-color-flat \

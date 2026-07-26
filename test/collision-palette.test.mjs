@@ -1,7 +1,7 @@
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { palettizeColors, smoothVertexColors } from '../src/lib/mesh/index.js';
+import { mapToPalette, palettizeColors, parsePaletteColors, smoothVertexColors } from '../src/lib/mesh/index.js';
 
 import { assertClose } from './helpers/summary-compare.mjs';
 
@@ -227,5 +227,122 @@ describe('palettizeColors', () => {
 
         assert.strictEqual(result.length, colors.length);
         assert.strictEqual(distinctSrgb(result).length, 1, 'a single input colour yields a single entry');
+    });
+});
+
+describe('parsePaletteColors', () => {
+    it('converts hex to linear with and without a leading hash', () => {
+        const parsed = parsePaletteColors(['#3243aa', '4444ff']);
+        assert.strictEqual(parsed.length, 6);
+
+        const expected = [0x32, 0x43, 0xaa, 0x44, 0x44, 0xff].map(b => srgbToLinear(b / 255));
+        for (let i = 0; i < 6; i++) {
+            assertClose(parsed[i], expected[i], 1e-6, `channel ${i}`);
+        }
+    });
+
+    it('expands #rgb shorthand and tolerates surrounding whitespace', () => {
+        const short = parsePaletteColors([' #f0a ']);
+        const long = parsePaletteColors(['#ff00aa']);
+        for (let i = 0; i < 3; i++) {
+            assert.strictEqual(short[i], long[i], `channel ${i} must match the long form`);
+        }
+    });
+
+    it('is case insensitive', () => {
+        const upper = parsePaletteColors(['#3243AA']);
+        const lower = parsePaletteColors(['#3243aa']);
+        for (let i = 0; i < 3; i++) assert.strictEqual(upper[i], lower[i], `channel ${i}`);
+    });
+
+    it('rejects malformed colours and an empty list', () => {
+        for (const spec of ['#12345', 'nothex', '#gggggg', '#', '0x3243aa']) {
+            assert.throws(() => parsePaletteColors([spec]), /Invalid palette colour/, `must reject ${spec}`);
+        }
+        assert.throws(() => parsePaletteColors([]), /empty/);
+    });
+});
+
+describe('mapToPalette', () => {
+    const palette = parsePaletteColors(['#3243aa', '4444ff']);
+
+    it('emits only the given colours, exactly', () => {
+        const colors = buildColors([
+            { rgb: [0.80, 0.20, 0.20], count: 10 },
+            { rgb: [0.20, 0.25, 0.90], count: 10 },
+            { rgb: [0.50, 0.50, 0.50], count: 10 }
+        ]);
+
+        const result = mapToPalette(colors, palette);
+        assert.strictEqual(result.length, colors.length);
+
+        const entries = new Set();
+        for (let e = 0; e < palette.length / 3; e++) {
+            entries.add(`${palette[e * 3]},${palette[e * 3 + 1]},${palette[e * 3 + 2]}`);
+        }
+        for (let v = 0; v < result.length / 3; v++) {
+            const key = `${result[v * 3]},${result[v * 3 + 1]},${result[v * 3 + 2]}`;
+            assert.ok(entries.has(key), `vertex ${v} colour ${key} is not a palette entry`);
+        }
+    });
+
+    it('gives every vertex its nearest entry', () => {
+        // one vertex per palette colour, plus a mid-grey that must pick one
+        const colors = new Float32Array([
+            palette[0], palette[1], palette[2],
+            palette[3], palette[4], palette[5],
+            srgbToLinear(0.5), srgbToLinear(0.5), srgbToLinear(0.5)
+        ]);
+
+        const result = mapToPalette(colors, palette);
+
+        for (let c = 0; c < 3; c++) {
+            assertClose(result[c], palette[c], 1e-6, `first entry channel ${c} must be untouched`);
+            assertClose(result[3 + c], palette[3 + c], 1e-6, `second entry channel ${c} must be untouched`);
+        }
+
+        const grey = srgbAt(colors, 2);
+        const assigned = srgbAt(result, 2);
+        const candidates = [srgbAt(palette, 0), srgbAt(palette, 1)];
+        const nearest = candidates.reduce((a, b) => (dist(b, grey) < dist(a, grey) ? b : a));
+        assertClose(dist(assigned, grey), dist(nearest, grey), 1e-6, 'grey must take its nearest entry');
+    });
+
+    it('collapses to a single colour when given one entry', () => {
+        const single = parsePaletteColors(['#3243aa']);
+        const colors = buildColors([
+            { rgb: [0.80, 0.20, 0.20], count: 4 },
+            { rgb: [0.20, 0.25, 0.90], count: 4 }
+        ]);
+
+        const result = mapToPalette(colors, single);
+        for (let v = 0; v < result.length / 3; v++) {
+            for (let c = 0; c < 3; c++) {
+                assert.strictEqual(result[v * 3 + c], single[c], `vertex ${v} channel ${c}`);
+            }
+        }
+    });
+
+    it('absorbs an isolated speckle voxel when coherentRadius is set', () => {
+        // the run sits on '#3243aa' and the speckle on '#4444ff', so the two
+        // start out on different palette entries
+        const colors = buildColors([
+            { rgb: [0.196, 0.263, 0.667], count: 20 },
+            { rgb: [0.267, 0.267, 1.000], count: 1 },
+            { rgb: [0.196, 0.263, 0.667], count: 20 }
+        ]);
+        const positions = buildLinePositions(colors.length / 3);
+        const opts = { positions, voxelResolution: 1 };
+
+        const plain = mapToPalette(colors, palette, opts);
+        const filtered = mapToPalette(colors, palette, { ...opts, coherentRadius: 1 });
+
+        assert.strictEqual(distinctSrgb(plain).length, 2, 'without the filter the speckle keeps its own entry');
+        assert.strictEqual(distinctSrgb(filtered).length, 1, 'majority filter must absorb the lone speckle');
+    });
+
+    it('rejects an empty palette', () => {
+        assert.throws(() => mapToPalette(buildColors([{ rgb: [0.5, 0.5, 0.5], count: 1 }]), new Float32Array(0)),
+            /at least one palette colour/);
     });
 });

@@ -5,6 +5,6 @@ export { voxelFaces } from './voxel-faces';
 export { computeVertexNormals } from './normals';
 export { colorizeVertices } from './colorize';
 export type { SplatColorColumns } from './colorize';
-export { palettizeColors } from './palette';
+export { palettizeColors, mapToPalette, parsePaletteColors } from './palette';
 export type { PalettizeOptions } from './palette';
 export { MAX_COLOR_RADIUS, smoothVertexColors, majorityFilterIndices } from './color-spatial';

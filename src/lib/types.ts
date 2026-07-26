@@ -21,6 +21,14 @@ type CollisionMeshShape = 'smooth' | 'faces' | 'voxel' | 'tris';
 type CollisionColorMode = 'average' | 'solid';
 
 /**
+ * Palette used to quantize colored collision-mesh vertex colors.
+ *
+ * - a number - build a palette of at most this many colors from the mesh itself.
+ * - a list of sRGB hex colors (`['#3243aa', '4444ff']`, `#rgb` or `#rrggbb`, hash optional) - stick to exactly these colors, skipping palette selection.
+ */
+type CollisionColorPalette = number | string[];
+
+/**
  * Options for read/write operations.
  */
 type Options = {
@@ -72,8 +80,8 @@ type Options = {
     /** Vertex color algorithm for `voxel`/`tris` collision meshes. Ignored for grey shapes. Default: `'average'`. */
     collisionColorMode?: CollisionColorMode;
 
-    /** Quantize collision-mesh vertex colors to a k-means palette of this many colors. Off by default. Applies to `voxel`/`tris` collision meshes. */
-    collisionColorPalette?: number;
+    /** Quantize collision-mesh vertex colors: a number builds a k-means palette of at most that many colors, a list of sRGB hex colors sticks to exactly those. Off by default. Applies to `voxel`/`tris` collision meshes. */
+    collisionColorPalette?: CollisionColorPalette;
 
     /** When true, average each triangle's vertex colors and assign the result to all three vertices, giving faces a uniform flat color. Default: false. */
     collisionColorFlat?: boolean;
@@ -193,4 +201,4 @@ type Param = {
  */
 type DeviceCreator = () => Promise<import('playcanvas').GraphicsDevice>;
 
-export type { CollisionMeshShape, CollisionColorMode, Options, Param, DeviceCreator };
+export type { CollisionMeshShape, CollisionColorMode, CollisionColorPalette, Options, Param, DeviceCreator };

@@ -89,6 +89,26 @@ describe('writeVoxel collisionMesh validation', function () {
         }
     });
 
+    it('rejects invalid collisionColorPalette values', async function () {
+        const runPalette = collisionColorPalette => writeVoxel({
+            filename: 'scene.voxel.json',
+            dataTable: new DataTable([new Column('x', new Float32Array(1))]),
+            createDevice: dummyCreateDevice,
+            collisionMesh: 'voxel',
+            collisionColorPalette
+        }, new MemoryFileSystem());
+
+        await assert.rejects(runPalette([]), /at least one colour/, 'an empty colour list is not a palette');
+        await assert.rejects(runPalette(['#3243aa', 'nothex']), /Invalid palette colour: nothex/);
+        await assert.rejects(runPalette(0), /must be an integer >= 1 or a list of hex colours/);
+        await assert.rejects(runPalette(2.5), /must be an integer >= 1 or a list of hex colours/);
+
+        // a well-formed palette gets past validation and on to the missing
+        // colour columns for the 'voxel' shape
+        await assert.rejects(runPalette(['#3243aa', '4444ff']), /missing required column/);
+        await assert.rejects(runPalette(8), /missing required column/);
+    });
+
     it('does not require color columns for uncolored shapes', async function () {
         for (const shape of ['smooth', 'faces']) {
             await assert.rejects(
