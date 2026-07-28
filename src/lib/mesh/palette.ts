@@ -1,42 +1,6 @@
 import { buildVertexHash, forEachNeighbor, majorityFilterIndices } from './color-spatial';
 import { srgbToLinear } from './colorize';
-
-// Oklab (Björn Ottosson). Converts natively from linear RGB, so no gamma
-// round-trip is needed for clustering.
-const linearToOklab = (r: number, g: number, b: number): [number, number, number] => {
-    const l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
-    const m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
-    const s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
-
-    // cbrt, not ** (1 / 3): the latter is NaN for the marginally negative
-    // values that upstream colour clamping can leave behind.
-    const l_ = Math.cbrt(l);
-    const m_ = Math.cbrt(m);
-    const s_ = Math.cbrt(s);
-
-    return [
-        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
-        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
-        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_
-    ];
-};
-
-const oklabToLinear = (L: number, A: number, B: number): [number, number, number] => {
-    const l_ = L + 0.3963377774 * A + 0.2158037573 * B;
-    const m_ = L - 0.1055613458 * A - 0.0638541728 * B;
-    const s_ = L - 0.0894841775 * A - 1.2914855480 * B;
-
-    const l = l_ * l_ * l_;
-    const m = m_ * m_ * m_;
-    const s = s_ * s_ * s_;
-
-    // A mean of in-gamut colours can land just outside sRGB, so clamp.
-    return [
-        Math.min(Math.max(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, 0), 1),
-        Math.min(Math.max(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, 0), 1),
-        Math.min(Math.max(-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s, 0), 1)
-    ];
-};
+import { linearToOklab, oklabToLinear, toOklabArray } from './oklab';
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -49,16 +13,27 @@ const oklabToLinear = (L: number, A: number, B: number): [number, number, number
 // output on such a scene looks either washed towards one tone or speckled.
 //
 // How to re-measure, since none of this is obvious from the values alone:
-// export a mesh with `--collision-mesh voxel` and no palette to get the
-// reference colours, then compare quantized output against it on two axes —
-// how many distinct hue families survive, and mean per-vertex colour drift.
-// Coverage and drift pull in opposite directions; the settings below sit
-// deliberately towards coverage, per the feature's intent.
+// `node --import tsx tools/color-noise-bench.mjs` builds a synthetic diorama
+// with known per-material colours, runs this pipeline over it, and reports
+// spatial noise, colour drift and small-feature survival side by side. Coverage
+// and drift pull in opposite directions; the settings below sit deliberately
+// towards coverage, per the feature's intent.
 //
 //   LIGHTNESS_WEIGHT     lower = more slots on hue, fewer on light/dark
 //   L/AB_BIN_STEP        candidate granularity; smaller = more, finer bins
 //   SUPPORT_*            what counts as a real region vs. scattered noise
 //   MAX_ITERS            refinement budget
+//
+// One property worth knowing before touching any of it: because refinement
+// gives every candidate bin one vote, a material's share of the palette tracks
+// how far its colours *spread* in Oklab, not how much of the mesh it covers. A
+// noisy material spreads across many bins and so collects many entries, and
+// adjacent faces then alternate between them — quantized output that reads as
+// noisier than the splats it came from. Two directions were measured and
+// rejected as fixes: weighting bins by vertex population (much worse — it hands
+// the palette to whichever material is largest) and using a different lightness
+// weight for assignment than for clustering (no effect). The variance itself is
+// the thing to remove, which is `smoothVertexColors`' job, upstream of here.
 // ---------------------------------------------------------------------------
 
 // Lightness counts for less than chroma so palette slots are spent on hue
@@ -341,17 +316,6 @@ const applyPalette = (
     }
 
     return result;
-};
-
-const toOklabArray = (linearColors: Float32Array): Float32Array => {
-    const oklab = new Float32Array(linearColors.length);
-    for (let v = 0; v < linearColors.length / 3; v++) {
-        const [L, A, B] = linearToOklab(linearColors[v * 3], linearColors[v * 3 + 1], linearColors[v * 3 + 2]);
-        oklab[v * 3] = L;
-        oklab[v * 3 + 1] = A;
-        oklab[v * 3 + 2] = B;
-    }
-    return oklab;
 };
 
 // `#rgb` / `#rrggbb`, with the hash optional so a comma-separated list only

@@ -274,9 +274,9 @@ describe('CLI parsing', () => {
         }
     });
 
-    it('rejects a collision colour radius outside (0, 8]', async () => {
+    it('rejects a collision colour radius outside [0, 8]', async () => {
         for (const [flag, value] of [
-            ['--collision-color-smooth', '0'],
+            ['--collision-color-smooth', '-1'],
             ['--collision-color-coherent', '9'],
             ['--collision-color-smooth', 'notanumber']
         ]) {
@@ -293,6 +293,21 @@ describe('CLI parsing', () => {
 
             assert.notStrictEqual(result.code, 0, `CLI should reject ${flag} ${value}`);
         }
+    });
+
+    it('accepts a collision colour radius of 0 as an explicit opt-out', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-mesh',
+            'voxel',
+            '--collision-color-smooth',
+            '0',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
     });
 
     it('warns and ignores collision colour radii without a coloured mesh', async () => {

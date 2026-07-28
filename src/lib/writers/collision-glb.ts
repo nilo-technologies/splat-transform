@@ -324,7 +324,7 @@ const buildCollisionOutputs = (
 
         if (colorSource.smoothRadius !== undefined && colorSource.smoothRadius > 0) {
             colors = smoothVertexColors(colors, finalMesh.positions, colorSource.smoothRadius, voxelResolution);
-            logger.info(`smoothed: ${colorSource.smoothRadius} voxel radius`);
+            logger.info(`denoised: ${colorSource.smoothRadius} voxel radius`);
         }
 
         const palette = colorSource.palette;

@@ -24,6 +24,34 @@ import {
 } from '../voxel';
 import { SparseVoxelGrid } from '../voxel/sparse-voxel-grid';
 
+// Denoising radius, in voxels, used when a palette is requested and no explicit
+// radius is given. Two voxels is where the measured noise reduction flattens
+// out (see tools/color-noise-bench.mjs); the neighbourhood cost grows with the
+// cube of the radius, so wider buys little for a lot of time.
+const DEFAULT_COLLISION_COLOR_SMOOTH = 2;
+
+/**
+ * Pick the colour-denoising radius actually used.
+ *
+ * Quantizing amplifies whatever colour noise the splats carry: a material whose
+ * colours spread widely occupies many candidate bins, so it collects several
+ * palette entries and neighbouring faces alternate between them. Denoising
+ * first is what keeps a palettized mesh from reading as noisier than the splats
+ * it came from, so it is on by default whenever a palette is requested. An
+ * explicit radius always wins, including `0` to opt out.
+ *
+ * @param palette - The requested palette, or undefined for no quantization.
+ * @param explicit - The caller's `collisionColorSmooth`, if any.
+ * @returns The radius in voxels, or undefined for no denoising.
+ */
+const resolveColorSmoothRadius = (
+    palette: CollisionColorPalette | undefined,
+    explicit: number | undefined
+): number | undefined => {
+    if (explicit !== undefined) return explicit;
+    return palette !== undefined ? DEFAULT_COLLISION_COLOR_SMOOTH : undefined;
+};
+
 /**
  * Options for writing a voxel octree file.
  */
@@ -70,10 +98,10 @@ type WriteVoxelOptions = {
     /** When true, average each triangle's vertex colors for a uniform per-face flat colour. Default: false. */
     collisionColorFlat?: boolean;
 
-    /** Spatially average each vertex color with neighbours within this many voxels before building the palette. Must be > 0 and <= 8. Default: off. */
+    /** Edge-preserving denoise radius in voxels, applied before building the palette: each vertex takes the mean of the neighbours within this radius whose colour is perceptually close to its own, so noise averages out while material boundaries stay crisp. Must be >= 0 and <= 8; 0 disables it. Default: 2 when `collisionColorPalette` is set, off otherwise. */
     collisionColorSmooth?: number;
 
-    /** After palette assignment, snap each vertex to the dominant palette color within this many voxels. Must be > 0 and <= 8. Default: off. */
+    /** After palette assignment, snap each vertex to the dominant palette color within this many voxels. Must be >= 0 and <= 8; 0 disables it. Default: off. */
     collisionColorCoherent?: number;
 
     /** Path to also write the collision voxels to as a MagicaVoxel `.vox` model. Requires a `voxel`/`tris` collision mesh. Default: off. */
@@ -385,10 +413,12 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         ['collisionColorSmooth', collisionColorSmooth],
         ['collisionColorCoherent', collisionColorCoherent]
     ] as const) {
-        if (value !== undefined && (!(value > 0) || value > MAX_COLOR_RADIUS)) {
-            throw new Error(`${name} must be > 0 and <= ${MAX_COLOR_RADIUS}, got ${value}`);
+        if (value !== undefined && (!(value >= 0) || value > MAX_COLOR_RADIUS)) {
+            throw new Error(`${name} must be >= 0 and <= ${MAX_COLOR_RADIUS}, got ${value}`);
         }
     }
+
+    const smoothRadius = resolveColorSmoothRadius(collisionColorPalette, collisionColorSmooth);
 
     if (navCapsule && !navSeed) {
         logger.warn('navCapsule requires navSeed for nav carving, skipping nav carving');
@@ -565,7 +595,7 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
             mode: collisionColorMode,
             palette: collisionColorPalette,
             flatShade: collisionColorFlat,
-            smoothRadius: collisionColorSmooth,
+            smoothRadius,
             coherentRadius: collisionColorCoherent
         } : null;
 
@@ -609,4 +639,4 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
     }
 };
 
-export { writeVoxel, writeOctreeFiles, type WriteVoxelOptions, type VoxelMetadata };
+export { writeVoxel, writeOctreeFiles, resolveColorSmoothRadius, type WriteVoxelOptions, type VoxelMetadata };

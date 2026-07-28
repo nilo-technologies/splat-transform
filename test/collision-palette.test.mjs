@@ -206,6 +206,64 @@ describe('palettizeColors', () => {
         assert(after < before, `smoothing must move the outlier towards red (${after} < ${before})`);
     });
 
+    it('smoothVertexColors keeps a boundary between two solid regions crisp', () => {
+        // 12 red then 12 blue. A plain neighbourhood mean bleeds each colour
+        // several vertices into the other; the range test rejects the far side,
+        // so both regions stay exactly their own colour right up to the seam.
+        const red = [0.80, 0.20, 0.20];
+        const blue = [0.20, 0.30, 0.80];
+        const colors = buildColors([{ rgb: red, count: 12 }, { rgb: blue, count: 12 }]);
+        const positions = buildLinePositions(colors.length / 3);
+
+        const smoothed = smoothVertexColors(colors, positions, 2, 1);
+
+        for (const [index, truth] of [[11, red], [12, blue]]) {
+            const drift = dist(srgbAt(smoothed, index), truth);
+            assert(drift < 0.02, `vertex ${index} at the seam drifted by ${drift}`);
+        }
+    });
+
+    it('smoothVertexColors collapses noise inside a region towards one colour', () => {
+        // A single material sampled with per-vertex jitter, as reconstruction
+        // noise produces. The filter should converge the run on its mean.
+        const base = [0.45, 0.55, 0.35];
+        const groups = [];
+        for (let i = 0; i < 40; i++) {
+            const jitter = ((i * 7919) % 17) / 17 * 0.08 - 0.04;
+            groups.push({ rgb: base.map(c => c + jitter), count: 1 });
+        }
+        const colors = buildColors(groups);
+        const positions = buildLinePositions(colors.length / 3);
+
+        const spread = (c) => {
+            let lo = Infinity;
+            let hi = -Infinity;
+            // interior only, so the shrinking neighbourhood at the ends does
+            // not dominate the measurement
+            for (let v = 4; v < c.length / 3 - 4; v++) {
+                const l = srgbAt(c, v)[1];
+                lo = Math.min(lo, l);
+                hi = Math.max(hi, l);
+            }
+            return hi - lo;
+        };
+
+        const smoothed = smoothVertexColors(colors, positions, 2, 1);
+        assert(spread(smoothed) < spread(colors) / 4,
+            `noise spread must shrink markedly (${spread(smoothed)} vs ${spread(colors)})`);
+    });
+
+    it('smoothVertexColors leaves an already-uniform region untouched', () => {
+        const rgb = [0.5, 0.4, 0.3];
+        const colors = buildColors([{ rgb, count: 20 }]);
+        const positions = buildLinePositions(colors.length / 3);
+
+        const smoothed = smoothVertexColors(colors, positions, 2, 1);
+        for (let i = 0; i < colors.length; i++) {
+            assertClose(smoothed[i], colors[i], 1e-5, `channel ${i} must be unchanged`);
+        }
+    });
+
     it('is a no-op relative to omitting opts when no spatial option is set', () => {
         const colors = buildColors([
             { rgb: [0.70, 0.30, 0.20], count: 12 },

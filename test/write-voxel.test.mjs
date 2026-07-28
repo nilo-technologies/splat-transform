@@ -9,7 +9,7 @@ import { Vec3 } from 'playcanvas';
 
 import { Column, DataTable } from '../src/lib/index.js';
 import { MemoryFileSystem } from '../src/lib/io/write/index.js';
-import { writeOctreeFiles, writeVoxel } from '../src/lib/writers/write-voxel.js';
+import { resolveColorSmoothRadius, writeOctreeFiles, writeVoxel } from '../src/lib/writers/write-voxel.js';
 
 describe('writeOctreeFiles', function () {
     it('writes metadata and little-endian nodes followed by leafData', async function () {
@@ -121,5 +121,22 @@ describe('writeVoxel collisionMesh validation', function () {
                 `shape '${shape}' should not require color columns`
             );
         }
+    });
+});
+
+describe('resolveColorSmoothRadius', function () {
+    it('denoises by default only when a palette is requested', function () {
+        assert.strictEqual(resolveColorSmoothRadius(undefined, undefined), undefined,
+            'no palette means no denoising unless asked for');
+        assert.strictEqual(resolveColorSmoothRadius(8, undefined), 2,
+            'a k-means palette turns denoising on');
+        assert.strictEqual(resolveColorSmoothRadius(['#3243aa'], undefined), 2,
+            'a fixed palette turns denoising on too');
+    });
+
+    it('always honours an explicit radius, including zero', function () {
+        assert.strictEqual(resolveColorSmoothRadius(8, 4), 4);
+        assert.strictEqual(resolveColorSmoothRadius(8, 0), 0, '0 must opt out of the default');
+        assert.strictEqual(resolveColorSmoothRadius(undefined, 3), 3);
     });
 });

@@ -86,10 +86,10 @@ type Options = {
     /** When true, average each triangle's vertex colors and assign the result to all three vertices, giving faces a uniform flat color. Default: false. */
     collisionColorFlat?: boolean;
 
-    /** Spatially average each vertex color with neighbours within this many voxels before building the palette, suppressing isolated color noise. Off by default. */
+    /** Edge-preserving denoise radius in voxels, applied before building the palette: each vertex takes the mean of the neighbours within this radius whose colour is perceptually close to its own, so noise averages out while material boundaries stay crisp. 0 disables it. Defaults to 2 when `collisionColorPalette` is set, off otherwise. */
     collisionColorSmooth?: number;
 
-    /** After palette assignment, snap each vertex to the dominant palette color within this many voxels, removing isolated speckle. Off by default. */
+    /** After palette assignment, snap each vertex to the dominant palette color within this many voxels, removing isolated speckle. 0 disables it. Off by default. */
     collisionColorCoherent?: number;
 
     /** Also write the collision voxels to this path as a MagicaVoxel `.vox` model, using the same colors baked into the collision mesh. Requires a `voxel`/`tris` collision mesh. */

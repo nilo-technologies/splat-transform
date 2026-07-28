@@ -238,22 +238,31 @@ Apply when writing `.voxel.json` (sparse voxel octree for collision detection). 
     --collision-color-flat              Give every face one uniform color instead of interpolating across it.
                                           Combined with --collision-color-palette the face takes its dominant
                                           palette entry, so the output never exceeds the palette. Default: false
-    --collision-color-smooth   <r>      Spatially average each vertex color with its neighbours within r voxels
-                                          (fractional allowed) before the palette is built. Suppresses isolated
-                                          color noise at the cost of softening color edges. Max 8. Default: off
+    --collision-color-smooth   <r>      Edge-preserving denoise within r voxels (fractional allowed) before the
+                                          palette is built: each vertex averages only the neighbours whose color
+                                          is perceptually close to its own, so noise inside a material averages
+                                          out while boundaries between materials stay crisp. Max 8; 0 disables.
+                                          Default: 2 with --collision-color-palette, off otherwise
     --collision-color-coherent <r>      After palette assignment, snap each vertex to the dominant palette color
                                           within r voxels. Removes leftover speckle while leaving palette
-                                          entries exact and color boundaries crisp. Max 8. Default: off
+                                          entries exact and color boundaries crisp. Max 8; 0 disables.
+                                          Default: off
     --collision-voxels  <file.vox>      Also write the collision voxels as a MagicaVoxel .vox model, carrying
                                           the same colors baked into the collision mesh. Requires a voxel/tris
                                           collision mesh. Default: off
 ```
 
-The two spatial options are independent and both off by default: `--collision-color-smooth` cleans the colors *before* the palette is built, `--collision-color-coherent` cleans the assignment *after*. Radii are in voxels, so they scale with `--voxel-params` size. Start with `1` for either.
+The two spatial options are independent: `--collision-color-smooth` cleans the colors *before* the palette is built, `--collision-color-coherent` cleans the assignment *after*. Radii are in voxels, so they scale with `--voxel-params` size.
+
+Smoothing runs at radius `2` by default whenever a palette is requested, because quantizing amplifies colour noise rather than hiding it. Palette entries are seeded from binned candidate colours, so a material's share of the palette follows how widely its colours *spread*, not how much of the mesh it covers: a noisy material such as reconstructed foliage spreads across many bins, collects a dozen entries, and neighbouring faces then alternate between them. The result is quantized output that reads as noisier than the splats it came from, even at a small palette size — the smooth colour gradient became hard-edged patches. Denoising first removes the spread, so those slots go to genuinely distinct materials instead.
+
+The filter is edge-preserving, so this costs very little detail: a vertex only averages neighbours already within about two just-noticeable differences of its own colour, which excludes anything across a material boundary. On the reference diorama, the default takes same-material colour changes from ~22% of neighbouring face pairs down to ~7% and isolated speckle from ~3.8% to ~0.7%, while *lowering* colour error both overall and at material boundaries. Raise it towards `3`–`4` for very noisy captures, or pass `0` to turn it off and get the previous behaviour. Add `--collision-color-coherent 1` on top to absorb any speckle that survives into the assignment.
 
 `--collision-voxels` emits the same voxels the collision mesh was built from, so the `.vox` opens in MagicaVoxel looking like the `.glb` — every colour option above applies to both. Two format limits apply: a model spans at most 256 voxels per axis (raise the voxel size in `--voxel-params` if you hit it) and holds at most 255 colours, so a palette larger than that, or no palette at all, is reduced to 255 for the `.vox` only. Because a MagicaVoxel voxel carries one colour while a mesh voxel has up to six independently coloured faces, each voxel takes the colour held by most of its faces.
 
-Palette selection deliberately favours hue coverage over per-vertex colour accuracy, so a small strongly-coloured feature is kept rather than averaged away. That balance is set by a handful of tuning constants at the top of [`src/lib/mesh/palette.ts`](src/lib/mesh/palette.ts) — how far lightness is discounted against chroma (`LIGHTNESS_WEIGHT`), candidate colour granularity (`L_BIN_STEP` / `AB_BIN_STEP`), and what separates a real region from scattered noise (`SUPPORT_*`). They were calibrated against one reference scene that is ~92% warm by vertex count, so a scene with a very different colour balance may want different values; that file documents each constant and how to re-measure the coverage/drift trade-off.
+Palette selection deliberately favours hue coverage over per-vertex colour accuracy, so a small strongly-coloured feature is kept rather than averaged away. That balance is set by a handful of tuning constants at the top of [`src/lib/mesh/palette.ts`](src/lib/mesh/palette.ts) — how far lightness is discounted against chroma (`LIGHTNESS_WEIGHT`), candidate colour granularity (`L_BIN_STEP` / `AB_BIN_STEP`), and what separates a real region from scattered noise (`SUPPORT_*`). They were calibrated against one reference scene that is ~92% warm by vertex count, so a scene with a very different colour balance may want different values; that file documents each constant.
+
+To re-measure any of it, run `node --import tsx tools/color-noise-bench.mjs`. It builds a synthetic diorama whose true per-material colours are known, runs the real colouring pipeline over it, and reports spatial noise, colour drift and small-feature survival side by side, writing a top-down PNG per configuration so the numbers can be checked by eye.
 
 ## Image Output Options
 
@@ -456,9 +465,9 @@ splat-transform -K voxel --collision-color-palette 16 input.ply output.voxel.jso
 # Restricted to an explicit palette instead of one chosen from the scene
 splat-transform -K voxel --collision-color-palette '#3243aa,4444ff' input.ply output.voxel.json
 
-# Same, with flat per-voxel faces and both spatial passes enabled
+# Same, with flat per-voxel faces and a wider denoise for a noisy capture
 splat-transform -K voxel --collision-color solid --collision-color-flat \
-    --collision-color-palette 16 --collision-color-smooth 1 --collision-color-coherent 1 \
+    --collision-color-palette 16 --collision-color-smooth 3 --collision-color-coherent 1 \
     input.ply output.voxel.json
 
 # Also emit a MagicaVoxel model of the same voxels and colors

@@ -443,8 +443,8 @@ const parseArguments = async () => {
     const parseColorRadius = (name: string, raw: string | undefined): number | undefined => {
         if (raw === undefined) return undefined;
         const radius = parseNumber(raw);
-        if (!(radius > 0) || radius > MAX_COLOR_RADIUS) {
-            throw new Error(`Invalid ${name} value: ${raw}. Must be > 0 and <= ${MAX_COLOR_RADIUS}.`);
+        if (!(radius >= 0) || radius > MAX_COLOR_RADIUS) {
+            throw new Error(`Invalid ${name} value: ${raw}. Must be >= 0 and <= ${MAX_COLOR_RADIUS}.`);
         }
         if (collisionMesh === false || collisionMesh === 'faces' || collisionMesh === 'smooth') {
             logger.warn(`--${name} only applies to voxel/tris collision meshes and will be ignored.`);
@@ -453,6 +453,8 @@ const parseArguments = async () => {
         return radius;
     };
 
+    // Left undefined when the flag is absent: writeVoxel supplies the default,
+    // which depends on whether a palette was requested.
     const collisionColorSmooth = parseColorRadius('collision-color-smooth', v['collision-color-smooth']);
     const collisionColorCoherent = parseColorRadius('collision-color-coherent', v['collision-color-coherent']);
 
@@ -886,7 +888,7 @@ VOXEL OUTPUT (.voxel.json)
         --collision-color    [average|solid]   Vertex color algorithm for voxel/tris collision meshes. solid snaps to the majority color instead of blending. Default: average
         --collision-color-palette   <n|colors>   Quantize collision mesh vertex colors to an n-color palette, or to a comma-separated list of hex colors (e.g. '#3243aa,4444ff' — quote it, as an unquoted # starts a shell comment). Default: off
         --collision-color-flat          Average each triangle's vertex colors for a uniform per-face flat colour. Default: false
-        --collision-color-smooth    <r>   Spatially average vertex colors within r voxels before quantizing, suppressing colour noise. Default: off
+        --collision-color-smooth    <r>   Edge-preserving denoise of vertex colors within r voxels before quantizing. Only perceptually similar neighbours are averaged, so material boundaries stay crisp. Default: 2 with --collision-color-palette, off otherwise. Use 0 to disable
         --collision-color-coherent  <r>   Snap each vertex to the dominant palette colour within r voxels, removing speckle. Default: off
         --collision-voxels  <file.vox>    Also write the collision voxels as a MagicaVoxel .vox model, same colours as the mesh. Default: off
 
