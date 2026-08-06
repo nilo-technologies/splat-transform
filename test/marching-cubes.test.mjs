@@ -10,7 +10,8 @@ import { SparseVoxelGrid } from '../src/lib/voxel/sparse-voxel-grid.js';
 import { marchingCubes } from '../src/lib/mesh/marching-cubes.js';
 import { coplanarMerge } from '../src/lib/mesh/coplanar-merge.js';
 import { voxelFaces } from '../src/lib/mesh/voxel-faces.js';
-import { buildCollisionMesh, buildCollisionOutputs } from '../src/lib/writers/collision-glb.js';
+import { buildCollisionMesh } from '../src/lib/writers/collision-glb.js';
+import { assertVoxFits, buildCollisionVox, downsampleGrid, enumerateOccupied, minVoxFactor, minVoxelSizeForVox, voxFitsAt } from '../src/lib/writers/collision-vox.js';
 
 // Linear block index: bx + by*nbx + bz*nbx*nby. The buffer stores blocks
 // keyed on this linear index now (not morton).
@@ -421,6 +422,222 @@ describe('voxelFaces', () => {
     });
 });
 
+/**
+ * Brute-force count of voxel faces exposed to empty space (or to outside the
+ * grid), which is exactly the quad count `perVoxel` must emit.
+ *
+ * @param {SparseVoxelGrid} grid - Grid to scan.
+ * @returns {number} Exposed face count.
+ */
+const countExposedFaces = (grid) => {
+    const neighbours = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1]];
+    let n = 0;
+    for (let iz = 0; iz < grid.nz; iz++) {
+        for (let iy = 0; iy < grid.ny; iy++) {
+            for (let ix = 0; ix < grid.nx; ix++) {
+                if (!grid.getVoxel(ix, iy, iz)) continue;
+                for (const [dx, dy, dz] of neighbours) {
+                    const x = ix + dx, y = iy + dy, z = iz + dz;
+                    const inside = x >= 0 && y >= 0 && z >= 0 &&
+                        x < grid.nx && y < grid.ny && z < grid.nz;
+                    if (!inside || !grid.getVoxel(x, y, z)) n++;
+                }
+            }
+        }
+    }
+    return n;
+};
+
+/**
+ * Assert the `perVoxel` output contract: triangles come in consecutive pairs,
+ * each pair spans exactly 4 distinct vertices forming an axis-aligned unit
+ * square, and both triangles of a pair share the same outward normal.
+ *
+ * `buildCollisionMesh` relies on the consecutive pairing to assign one flat
+ * colour per voxel quad without building an edge map.
+ *
+ * @param {{ positions: Float32Array, indices: Uint32Array }} mesh - Mesh to check.
+ * @param {number} voxelResolution - Expected quad edge length.
+ */
+const assertPerVoxelQuads = (mesh, voxelResolution) => {
+    const numTris = mesh.indices.length / 3;
+    assert.strictEqual(numTris % 2, 0, 'perVoxel should emit an even number of triangles');
+
+    const pos = (v, a) => mesh.positions[v * 3 + a];
+    const normalOf = (t) => {
+        const [a, b, c] = [0, 1, 2].map(k => mesh.indices[t * 3 + k]);
+        const e = [0, 1, 2].map(k => pos(b, k) - pos(a, k));
+        const f = [0, 1, 2].map(k => pos(c, k) - pos(a, k));
+        return [
+            e[1] * f[2] - e[2] * f[1],
+            e[2] * f[0] - e[0] * f[2],
+            e[0] * f[1] - e[1] * f[0]
+        ];
+    };
+
+    for (let q = 0; q < numTris / 2; q++) {
+        const t0 = q * 2;
+        const t1 = q * 2 + 1;
+        const verts = new Set();
+        for (let k = 0; k < 6; k++) verts.add(mesh.indices[t0 * 3 + k]);
+        assert.strictEqual(verts.size, 4,
+            `quad ${q} spans ${verts.size} distinct vertices, expected 4`);
+
+        // the 4 corners must be flat on one axis and unit-sized on the other two
+        const list = [...verts];
+        const extent = [0, 1, 2].map((a) => {
+            const vals = list.map(v => pos(v, a));
+            return Math.max(...vals) - Math.min(...vals);
+        });
+        const flatAxes = extent.filter(e => e < 1e-6).length;
+        assert.strictEqual(flatAxes, 1, `quad ${q} is not planar on a single axis: ${extent}`);
+        for (const e of extent) {
+            assert.ok(e < 1e-6 || Math.abs(e - voxelResolution) < 1e-6,
+                `quad ${q} edge ${e} is not ${voxelResolution}`);
+        }
+
+        // both triangles wind the same way
+        const n0 = normalOf(t0);
+        const n1 = normalOf(t1);
+        const dot = n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2];
+        assert.ok(dot > 0, `quad ${q} triangles have opposing winding`);
+    }
+};
+
+/**
+ * Assert no emitted quad lies in the given axis-aligned plane.
+ *
+ * Unlike the merged path, `perVoxel` legitimately places vertices at interior
+ * block boundaries (every quad is 1x1, so corners land on every grid line), so
+ * only whole faces in the plane indicate a wrongly emitted interior surface.
+ *
+ * @param {{ positions: Float32Array, indices: Uint32Array }} mesh - Mesh to check.
+ * @param {number} axis - Axis index the plane is normal to.
+ * @param {number} value - Coordinate of the plane along `axis`.
+ */
+const assertNoQuadInPlane = (mesh, axis, value) => {
+    for (let t = 0; t < mesh.indices.length / 3; t++) {
+        let all = true;
+        for (let k = 0; k < 3; k++) {
+            if (mesh.positions[mesh.indices[t * 3 + k] * 3 + axis] !== value) {
+                all = false;
+                break;
+            }
+        }
+        assert.ok(!all,
+            `triangle ${t} lies in the interior plane axis${axis}=${value}`);
+    }
+};
+
+describe('voxelFaces perVoxel', () => {
+    it('should return an empty mesh for an empty grid', () => {
+        const buffer = new BlockMaskBuffer();
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        const mesh = voxelFaces(toGrid(buffer, 4, 4, 4), bounds, 1.0, { perVoxel: true });
+
+        assert.strictEqual(mesh.positions.length, 0);
+        assert.strictEqual(mesh.indices.length, 0);
+    });
+
+    it('should emit one unit quad per exposed face of a solid block', () => {
+        const buffer = new BlockMaskBuffer();
+        buffer.addBlock(linearBlockIdx(0, 0, 0, 1, 1), SOLID_LO, SOLID_HI);
+
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        const grid = toGrid(buffer, 4, 4, 4);
+        const mesh = voxelFaces(grid, bounds, 1.0, { perVoxel: true });
+        const stats = meshStats(mesh);
+
+        // 6 sides of a 4x4x4 cube, 16 faces each
+        assert.strictEqual(countExposedFaces(grid), 96);
+        assert.strictEqual(stats.tris, 96 * 2);
+        assert.deepStrictEqual(stats.min, [0, 0, 0]);
+        assert.deepStrictEqual(stats.max, [4, 4, 4]);
+        assertVoxelGridCorners(mesh, bounds, 1.0);
+        assertPerVoxelQuads(mesh, 1.0);
+        assertClosedTriangleEdges(mesh);
+    });
+
+    it('should deduplicate shared corner vertices', () => {
+        const buffer = new BlockMaskBuffer();
+        buffer.addBlock(linearBlockIdx(0, 0, 0, 1, 1), SOLID_LO, SOLID_HI);
+
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        const mesh = voxelFaces(toGrid(buffer, 4, 4, 4), bounds, 1.0, { perVoxel: true });
+
+        // the surface of a 4x4x4 cube has 5^3 - 3^3 = 98 grid corners
+        assert.strictEqual(meshStats(mesh).verts, 98);
+    });
+
+    it('should not emit faces between adjacent solid blocks', () => {
+        const buffer = new BlockMaskBuffer();
+        buffer.addBlock(linearBlockIdx(0, 0, 0, 2, 1), SOLID_LO, SOLID_HI);
+        buffer.addBlock(linearBlockIdx(1, 0, 0, 2, 1), SOLID_LO, SOLID_HI);
+
+        const bounds = makeGridBounds(0, 0, 0, 8, 4, 4);
+        const grid = toGrid(buffer, 8, 4, 4);
+        const mesh = voxelFaces(grid, bounds, 1.0, { perVoxel: true });
+
+        assert.strictEqual(meshStats(mesh).tris, countExposedFaces(grid) * 2);
+        assertNoQuadInPlane(mesh, 0, 4);
+        assertPerVoxelQuads(mesh, 1.0);
+        assertClosedTriangleEdges(mesh);
+    });
+
+    it('should match the exposed face count on a ragged mixed-block shape', () => {
+        // face-connected L shape straddling a mixed and a solid block
+        const lo = ((1 << 0) | (1 << 1) | (1 << 2) | (1 << 4) | (1 << 5)) >>> 0;
+        const buffer = new BlockMaskBuffer();
+        buffer.addBlock(linearBlockIdx(0, 0, 0, 2, 2), lo, 0);
+        buffer.addBlock(linearBlockIdx(1, 1, 0, 2, 2), SOLID_LO, SOLID_HI);
+
+        const bounds = makeGridBounds(0, 0, 0, 8, 8, 4);
+        const grid = toGrid(buffer, 8, 8, 4);
+        const mesh = voxelFaces(grid, bounds, 1.0, { perVoxel: true });
+
+        assert.strictEqual(meshStats(mesh).tris, countExposedFaces(grid) * 2);
+        assertVoxelGridCorners(mesh, bounds, 1.0);
+        assertPerVoxelQuads(mesh, 1.0);
+    });
+
+    it('should honour a non-unit voxel resolution and grid origin', () => {
+        const buffer = new BlockMaskBuffer();
+        buffer.addBlock(linearBlockIdx(0, 0, 0, 1, 1), 1, 0);
+
+        const res = 0.25;
+        const bounds = makeGridBounds(-1, 2, 3, -1 + 4 * res, 2 + 4 * res, 3 + 4 * res);
+        const mesh = voxelFaces(toGrid(buffer, 4, 4, 4), bounds, res, { perVoxel: true });
+        const stats = meshStats(mesh);
+
+        assert.strictEqual(stats.tris, 12);
+        assert.strictEqual(stats.verts, 8);
+        assert.deepStrictEqual(stats.min, [-1, 2, 3]);
+        assert.deepStrictEqual(stats.max, [-1 + res, 2 + res, 3 + res]);
+        assertPerVoxelQuads(mesh, res);
+    });
+
+    it('should scale to a wide plate without losing the face count', () => {
+        // exercises the growth paths of the vertex table and output buffers
+        const n = 200;
+        const nb = n / 4;
+        const buffer = new BlockMaskBuffer();
+        const slabLo = 0x000F000F >>> 0;
+        for (let bz = 0; bz < nb; bz++) {
+            for (let bx = 0; bx < nb; bx++) {
+                buffer.addBlock(linearBlockIdx(bx, 0, bz, nb, 1), slabLo, 0);
+            }
+        }
+
+        const bounds = makeGridBounds(0, 0, 0, n, 4, n);
+        const grid = toGrid(buffer, n, 4, n);
+        const mesh = voxelFaces(grid, bounds, 1.0, { perVoxel: true });
+
+        assert.strictEqual(meshStats(mesh).tris, countExposedFaces(grid) * 2);
+        assertPerVoxelQuads(mesh, 1.0);
+        assertClosedTriangleEdges(mesh);
+    });
+});
+
 describe('buildCollisionMesh', () => {
     it('should skip smooth GLB output for an empty grid', () => {
         const buffer = new BlockMaskBuffer();
@@ -708,11 +925,54 @@ describe('buildCollisionMesh vertex colors', () => {
         }
     });
 
+    it('should keep every flat-shaded triangle facing outward', () => {
+        // Welding a quad's two triangles onto 4 shared vertices remaps the
+        // partner's indices; if that remap were wrong the winding would flip,
+        // which is invisible to a colour check but makes the collision mesh
+        // inside-out.
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        const colorSource = makeSplatColorSource([
+            { center: [2, 2, 2], extent: 4, color: [1, 0, 0], logit: 0 }
+        ], 'average');
+        colorSource.flatShade = true;
+
+        const bytes = buildCollisionMesh(solidGrid(), bounds, 1.0, 'voxel', colorSource);
+        const { json, bin } = parseGlb(bytes);
+        const posView = json.bufferViews[0];
+        const idxView = json.bufferViews[1];
+        const positions = new Float32Array(
+            bin.buffer, bin.byteOffset + posView.byteOffset, json.accessors[0].count * 3);
+        const indices = new Uint32Array(
+            bin.buffer, bin.byteOffset + idxView.byteOffset, json.accessors[1].count);
+
+        // the solid 4x4x4 block is centred at (2, 2, 2)
+        const centre = [2, 2, 2];
+        let checked = 0;
+        for (let t = 0; t < indices.length / 3; t++) {
+            const [a, b, c] = [0, 1, 2].map(k => indices[t * 3 + k]);
+            const p = i => [positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]];
+            const pa = p(a), pb = p(b), pc = p(c);
+            const e = [0, 1, 2].map(k => pb[k] - pa[k]);
+            const f = [0, 1, 2].map(k => pc[k] - pa[k]);
+            const n = [
+                e[1] * f[2] - e[2] * f[1],
+                e[2] * f[0] - e[0] * f[2],
+                e[0] * f[1] - e[1] * f[0]
+            ];
+            const mid = [0, 1, 2].map(k => (pa[k] + pb[k] + pc[k]) / 3 - centre[k]);
+            const dot = n[0] * mid[0] + n[1] * mid[1] + n[2] * mid[2];
+            assert.ok(dot > 0,
+                `triangle ${t} faces inward (dot ${dot}), winding was not preserved`);
+            checked++;
+        }
+        assert.strictEqual(checked, 96 * 2, 'a solid 4x4x4 block has 96 faces');
+    });
+
     it('should flat-shade each voxel quad to a uniform colour', () => {
         const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
         // two splats at opposite corners produce distinct vertex colours before
-        // flat-shading; after flat-shading the mesh is un-indexed with per-quad
-        // colours so both triangles of each voxel face share identical colours
+        // flat-shading; after flat-shading every triangle must be a single
+        // colour and both triangles of a voxel quad must agree
         const colorSource = makeSplatColorSource([
             { center: [0, 0, 0], extent: 4, color: [1, 0, 0], logit: 0 },
             { center: [4, 4, 4], extent: 4, color: [0, 0, 1], logit: 0 }
@@ -725,37 +985,53 @@ describe('buildCollisionMesh vertex colors', () => {
         const { json, bin } = parseGlb(bytes);
 
         const posAccessor = json.accessors[0];
+        const idxAccessor = json.accessors[1];
         const colorAccessor = json.accessors[2];
         const colorView = json.bufferViews[2];
+        const idxView = json.bufferViews[1];
 
-        const colors = new Float32Array(bin.buffer, bin.byteOffset + colorView.byteOffset, colorAccessor.count * 3);
+        assert.strictEqual(colorAccessor.count, posAccessor.count,
+            'every vertex needs a colour');
 
-        let trianglesChecked = 0;
+        const colors = new Float32Array(
+            bin.buffer, bin.byteOffset + colorView.byteOffset, colorAccessor.count * 3);
+        const indices = new Uint32Array(
+            bin.buffer, bin.byteOffset + idxView.byteOffset, idxAccessor.count);
+
+        // Read through the index buffer rather than assuming a vertex layout:
+        // voxel quads are welded to 4 vertices shared by their 2 triangles, so
+        // vertices do not come in per-triangle groups of 3.
+        const numTris = indices.length / 3;
+        const colorOf = v => [colors[v * 3], colors[v * 3 + 1], colors[v * 3 + 2]];
+
         let quadPairsChecked = 0;
-        for (let t = 0; t < posAccessor.count; t += 3) {
-            const off = t * 3;
-            // each triangle's 3 vertices must share the same colour
-            for (let ch = 0; ch < 3; ch++) {
-                assert.strictEqual(colors[off + ch], colors[off + 3 + ch],
-                    `triangle ${t / 3} channel ${ch}: vertex 0 and 1 must match`);
-                assert.strictEqual(colors[off + ch], colors[off + 6 + ch],
-                    `triangle ${t / 3} channel ${ch}: vertex 0 and 2 must match`);
+        for (let t = 0; t < numTris; t++) {
+            const [a, b, c] = [0, 1, 2].map(k => indices[t * 3 + k]);
+            const ca = colorOf(a);
+            for (const v of [b, c]) {
+                assert.deepStrictEqual(colorOf(v), ca,
+                    `triangle ${t} is not a single colour`);
             }
-            // consecutive triangles in a per-voxel mesh form quad pairs;
-            // even-indexed triangles should share colours with their odd
-            // partner
-            if (t > 0 && (t / 3) % 2 === 1) {
-                const prevOff = off - 9; // previous triangle's colour offset
-                for (let ch = 0; ch < 3; ch++) {
-                    assert.strictEqual(colors[off + ch], colors[prevOff + ch],
-                        `quad pair triangle ${t / 3} channel ${ch}: must match its partner`);
-                }
+            // consecutive triangles form quad pairs
+            if (t % 2 === 1) {
+                const prev = colorOf(indices[(t - 1) * 3]);
+                assert.deepStrictEqual(ca, prev,
+                    `quad pair triangle ${t} must match its partner`);
                 quadPairsChecked++;
             }
-            trianglesChecked++;
         }
-        assert.ok(trianglesChecked >= 8, `must check at least 8 triangles, got ${trianglesChecked}`);
+
+        assert.ok(numTris >= 8, `must check at least 8 triangles, got ${numTris}`);
         assert.ok(quadPairsChecked >= 4, `must check at least 4 quad pairs, got ${quadPairsChecked}`);
+
+        // welding means 4 vertices per quad, not 6
+        assert.strictEqual(posAccessor.count, (numTris / 2) * 4,
+            'each voxel quad should contribute exactly 4 vertices');
+
+        // more than one distinct colour, or the test proves nothing
+        const distinct = new Set();
+        for (let v = 0; v < posAccessor.count; v++) distinct.add(colorOf(v).join(','));
+        assert.ok(distinct.size > 1, 'fixture should produce more than one quad colour');
     });
 
     it('should not exceed the palette colour count when flat-shading is also enabled', () => {
@@ -1553,7 +1829,7 @@ const linearToSrgb8 = (c) => {
     return Math.min(255, Math.max(0, Math.round(s * 255)));
 };
 
-describe('buildCollisionOutputs vox', () => {
+describe('buildCollisionVox', () => {
     const voxColorSource = (paletteK) => {
         const cs = makeSplatColorSource([
             { center: [0, 0, 0], extent: 4, color: [1, 0, 0], logit: 0 },
@@ -1564,27 +1840,25 @@ describe('buildCollisionOutputs vox', () => {
         return cs;
     };
 
-    it('should emit no vox unless asked for', () => {
+    it('should return null for an empty grid', () => {
         const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
-        const out = buildCollisionOutputs(solidGrid(), bounds, 1.0, 'voxel', voxColorSource(4));
-        assert.ok(out.glb, 'glb should still be produced');
-        assert.strictEqual(out.vox, null, 'vox must be opt-in');
+        const grid = new SparseVoxelGrid(4, 4, 4);
+        assert.strictEqual(buildCollisionVox(grid, bounds, 1.0, voxColorSource(4)), null);
     });
 
-    it('should emit no vox for shapes that carry no colors', () => {
+    it('should not require a collision mesh', () => {
+        // the whole point of the direct path: colours come from the splats, so
+        // no mesh, vertex normals or face attribution are involved
         const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
-        for (const shape of ['faces', 'smooth']) {
-            const out = buildCollisionOutputs(solidGrid(), bounds, 1.0, shape, null, { emitVox: true });
-            assert.strictEqual(out.vox, null, `${shape} has no colors so cannot produce a vox`);
-        }
+        const bytes = buildCollisionVox(solidGrid(), bounds, 1.0, voxColorSource(4));
+        assert.ok(bytes, 'vox should be produced from the grid alone');
     });
 
     it('should write a structurally valid vox model', () => {
         const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
-        const out = buildCollisionOutputs(solidGrid(), bounds, 1.0, 'voxel', voxColorSource(4), { emitVox: true });
-        assert.ok(out.vox, 'vox should be produced');
+        const bytes = buildCollisionVox(solidGrid(), bounds, 1.0, voxColorSource(4));
 
-        const vox = parseVox(out.vox);
+        const vox = parseVox(bytes);
         assert.strictEqual(vox.magic, 'VOX ');
         assert.strictEqual(vox.version, 150);
         assert.deepStrictEqual(vox.chunks.map(c => c.id), ['MAIN', 'SIZE', 'XYZI', 'RGBA']);
@@ -1607,35 +1881,35 @@ describe('buildCollisionOutputs vox', () => {
         }
     });
 
-    it('should use the same colors the mesh was baked with', () => {
+    it('should respect the requested palette size', () => {
         const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
         const paletteK = 3;
-        const out = buildCollisionOutputs(
-            solidGrid(), bounds, 1.0, 'voxel', voxColorSource(paletteK), { emitVox: true });
+        const vox = parseVox(buildCollisionVox(solidGrid(), bounds, 1.0, voxColorSource(paletteK)));
 
-        const { json, bin } = parseGlb(out.glb);
-        const colorAccessor = json.accessors[2];
-        const colorView = json.bufferViews[2];
-        const colors = new Float32Array(
-            bin.buffer, bin.byteOffset + colorView.byteOffset, colorAccessor.count * 3);
-        const meshColors = new Set();
-        for (let v = 0; v < colorAccessor.count; v++) {
-            meshColors.add([
-                linearToSrgb8(colors[v * 3]),
-                linearToSrgb8(colors[v * 3 + 1]),
-                linearToSrgb8(colors[v * 3 + 2])
-            ].join(','));
-        }
-
-        // resolve each voxel through the palette; index i reads slot i-1
-        const vox = parseVox(out.vox);
         const used = new Set(vox.voxels.map(v => v[3]));
         assert.ok(used.size <= paletteK, `expected at most ${paletteK} colors, got ${used.size}`);
         for (const idx of used) {
-            const entry = vox.palette[idx - 1];
-            assert.strictEqual(entry[3], 255, 'used palette entries must be opaque');
-            assert.ok(meshColors.has(entry.slice(0, 3).join(',')),
-                `vox color ${entry.slice(0, 3)} is not one of the mesh colors`);
+            assert.strictEqual(vox.palette[idx - 1][3], 255, 'used palette entries must be opaque');
+        }
+    });
+
+    it('should place every voxel inside the declared model size', () => {
+        // a ragged shape, so the tight-bounds offsetting is actually exercised
+        const grid = new SparseVoxelGrid(8, 8, 8);
+        grid.setVoxel(5, 2, 3);
+        grid.setVoxel(6, 2, 3);
+        grid.setVoxel(5, 3, 3);
+        grid.setVoxel(5, 2, 6);
+        const bounds = makeGridBounds(0, 0, 0, 8, 8, 8);
+
+        const vox = parseVox(buildCollisionVox(grid, bounds, 1.0, voxColorSource(4)));
+        assert.strictEqual(vox.voxels.length, 4);
+        // x spans 5..6, y spans 2..3, z spans 3..6 -> 2 x 2 x 4, written as
+        // SIZE (dimX, dimZ, dimY)
+        assert.deepStrictEqual(vox.dims, [2, 4, 2]);
+        for (const [x, y, z] of vox.voxels) {
+            assert.ok(x < vox.dims[0] && y < vox.dims[1] && z < vox.dims[2],
+                `voxel ${x},${y},${z} outside declared size ${vox.dims}`);
         }
     });
 
@@ -1647,8 +1921,132 @@ describe('buildCollisionOutputs vox', () => {
         const bounds = makeGridBounds(0, 0, 0, 260, 4, 4);
 
         assert.throws(
-            () => buildCollisionOutputs(grid, bounds, 1.0, 'voxel', voxColorSource(4), { emitVox: true }),
-            /exceeds the MagicaVoxel limit|260/,
+            () => buildCollisionVox(grid, bounds, 1.0, voxColorSource(4)),
+            /exceeds the MagicaVoxel limit/,
             'must explain the per-axis limit rather than emit a corrupt file');
     });
+
+    it('should name a voxel size that would fit when rejecting', () => {
+        const grid = new SparseVoxelGrid(1024, 4, 4);
+        grid.setVoxel(0, 0, 0);
+        grid.setVoxel(1023, 0, 0);
+        const bounds = makeGridBounds(0, 0, 0, 1024, 4, 4);
+
+        // 1024 voxels at 0.02 spans 20.48 units, so 20.48/256 = 0.08 fits
+        assert.throws(
+            () => buildCollisionVox(grid, bounds, 0.02, voxColorSource(4)),
+            /--collision-voxels-size 0\.08\b/,
+            'the error should name a size the user can actually pass');
+    });
+});
+
+describe('vox size suggestion', () => {
+    // The suggested --collision-voxels-size has to be usable first time. Coarse
+    // cells align to the grid origin rather than to the occupied region, so a
+    // suggestion derived from span/256 alone can still be one cell too small.
+    const occupiedSpanning = (minIx, maxIx) => {
+        const nx = (((maxIx + 4) >> 2) << 2);
+        const grid = new SparseVoxelGrid(Math.max(4, nx), 4, 4);
+        grid.setVoxel(minIx, 0, 0);
+        grid.setVoxel(maxIx, 0, 0);
+        return enumerateOccupied(grid);
+    };
+
+    it('should suggest a factor that actually fits, for every offset', () => {
+        // offsets make the occupied region straddle coarse cell boundaries
+        for (let offset = 0; offset < 24; offset++) {
+            for (const span of [257, 300, 512, 513, 1000, 1024, 2411]) {
+                const occupied = occupiedSpanning(offset, offset + span - 1);
+                const factor = minVoxFactor(occupied);
+                assert.ok(voxFitsAt(occupied, factor),
+                    `offset ${offset} span ${span}: factor ${factor} does not fit`);
+                assert.ok(factor === 1 || !voxFitsAt(occupied, factor - 1),
+                    `offset ${offset} span ${span}: factor ${factor} is not minimal`);
+            }
+        }
+    });
+
+    it('should suggest 1 when the region already fits', () => {
+        const occupied = occupiedSpanning(0, 255);
+        assert.strictEqual(minVoxFactor(occupied), 1);
+        assert.strictEqual(minVoxelSizeForVox(occupied, 0.02), 0.02);
+    });
+
+    it('should accept the suggested size without a second failure', () => {
+        // reproduces the case where following the advice failed again: a
+        // 2411-voxel span at 0.02 whose span/256 factor leaves 257 coarse cells
+        const grid = new SparseVoxelGrid(2412, 4, 4);
+        grid.setVoxel(1, 0, 0);
+        grid.setVoxel(2411, 0, 0);
+        const bounds = makeGridBounds(0, 0, 0, 2412 * 0.02, 4 * 0.02, 4 * 0.02);
+        const occupied = enumerateOccupied(grid);
+
+        const suggested = minVoxelSizeForVox(occupied, 0.02);
+        const factor = Math.max(1, Math.round(suggested / 0.02));
+
+        // the suggestion must survive the round trip through the CLI's rounding
+        assert.doesNotThrow(() => assertVoxFits(occupied, 0.02, factor),
+            `suggested size ${suggested} still does not fit`);
+
+        const plan = downsampleGrid(grid, bounds, 0.02, factor);
+        const out = enumerateOccupied(plan.grid);
+        assert.ok(out.maxIx - out.minIx + 1 <= 256,
+            'the reduced grid must fit the per-axis limit');
+    });
+});
+
+describe('minVoxelSizeForVox', () => {
+    it('should return the span divided by the 256 axis limit', () => {
+        const grid = new SparseVoxelGrid(1024, 4, 4);
+        grid.setVoxel(0, 0, 0);
+        grid.setVoxel(1023, 0, 0);
+        const occupied = enumerateOccupied(grid);
+
+        assert.strictEqual(occupied.count, 2);
+        assert.strictEqual(occupied.maxIx - occupied.minIx + 1, 1024);
+        assert.strictEqual(minVoxelSizeForVox(occupied, 0.02), 1024 * 0.02 / 256);
+    });
+});
+
+describe('downsampleGrid', () => {
+    it('should return the input unchanged for factor 1', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        const grid = solidGrid();
+        const out = downsampleGrid(grid, bounds, 1.0, 1);
+        assert.strictEqual(out.grid, grid);
+        assert.strictEqual(out.voxelResolution, 1.0);
+    });
+
+    it('should keep a voxel wherever any fine voxel was solid', () => {
+        const grid = new SparseVoxelGrid(8, 8, 8);
+        grid.setVoxel(0, 0, 0);
+        grid.setVoxel(1, 1, 1); // same coarse cell as (0,0,0) at factor 2
+        grid.setVoxel(6, 0, 0);
+        const bounds = makeGridBounds(0, 0, 0, 8, 8, 8);
+
+        const out = downsampleGrid(grid, bounds, 0.5, 2);
+        assert.strictEqual(out.voxelResolution, 1.0);
+        assert.strictEqual(out.grid.nx % 4, 0, 'axes must stay block-aligned');
+
+        const seen = [];
+        out.grid.forEachOccupiedVoxel((x, y, z) => seen.push(`${x},${y},${z}`));
+        assert.deepStrictEqual(seen.sort(), ['0,0,0', '3,0,0']);
+    });
+
+    it('should shrink an over-large grid into the vox limit', () => {
+        const grid = new SparseVoxelGrid(1024, 4, 4);
+        grid.setVoxel(0, 0, 0);
+        grid.setVoxel(1023, 0, 0);
+        const bounds = makeGridBounds(0, 0, 0, 1024 * 0.02, 4 * 0.02, 4 * 0.02);
+
+        const out = downsampleGrid(grid, bounds, 0.02, 4);
+        const occupied = enumerateOccupied(out.grid);
+        assert.strictEqual(occupied.maxIx - occupied.minIx + 1, 256);
+        assert.ok(buildCollisionVox(out.grid, out.gridBounds, out.voxelResolution, voxColorSourceForDownsample()),
+            'the reduced grid should now encode');
+    });
+
+    const voxColorSourceForDownsample = () => makeSplatColorSource([
+        { center: [0, 0, 0], extent: 40, color: [1, 0, 0], logit: 0 }
+    ], 'average');
 });

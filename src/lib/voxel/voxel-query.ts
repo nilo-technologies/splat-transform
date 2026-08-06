@@ -4,13 +4,14 @@ import {
     evaluateGaussianAt,
     type GaussianColumns
 } from '../data-table';
+import { IntKeyMap } from '../utils/int-key-map';
 
 /**
  * Pre-computed lookup structures for efficient voxel block queries.
  */
 interface BlockLookup {
-    solidSet: Set<number>;
-    mixedMap: Map<number, number>;
+    solidSet: IntKeyMap;
+    mixedMap: IntKeyMap;
     masks: Uint32Array;
 }
 
@@ -41,13 +42,13 @@ interface BlockGridParams {
 const buildBlockLookup = (
     buffer: BlockMaskBuffer
 ): BlockLookup => {
-    const solidSet = new Set<number>();
     const solidIdx = buffer.getSolidBlocks();
+    const solidSet = new IntKeyMap(Math.ceil(Math.max(16, solidIdx.length) / 0.7));
     for (let i = 0; i < solidIdx.length; i++) {
-        solidSet.add(solidIdx[i]);
+        solidSet.set(solidIdx[i], 1);
     }
     const mixed = buffer.getMixedBlocks();
-    const mixedMap = new Map<number, number>();
+    const mixedMap = new IntKeyMap(Math.ceil(Math.max(16, mixed.blockIdx.length) / 0.7));
     for (let i = 0; i < mixed.blockIdx.length; i++) {
         mixedMap.set(mixed.blockIdx[i], i);
     }
@@ -91,7 +92,7 @@ const isCenterInOccupiedVoxel = (
     }
 
     const centerMixedIdx = lookup.mixedMap.get(centerBlockIdx);
-    if (centerMixedIdx !== undefined) {
+    if (centerMixedIdx !== -1) {
         const lx = Math.floor((px - grid.gridMinX - centerBx * grid.blockSize) / grid.voxelResolution);
         const ly = Math.floor((py - grid.gridMinY - centerBy * grid.blockSize) / grid.voxelResolution);
         const lz = Math.floor((pz - grid.gridMinZ - centerBz * grid.blockSize) / grid.voxelResolution);
@@ -165,7 +166,7 @@ const gaussianContributesToVoxels = (
                 if (blockFilter && !blockFilter.has(blockIdx)) continue;
                 const isSolid = lookup.solidSet.has(blockIdx);
                 const mixedIdx = isSolid ? -1 : lookup.mixedMap.get(blockIdx);
-                if (!isSolid && mixedIdx === undefined) continue;
+                if (!isSolid && mixedIdx === -1) continue;
 
                 const blockOriginX = grid.gridMinX + bbx * grid.blockSize;
                 const blockOriginY = grid.gridMinY + bby * grid.blockSize;

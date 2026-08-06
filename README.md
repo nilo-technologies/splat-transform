@@ -247,9 +247,13 @@ Apply when writing `.voxel.json` (sparse voxel octree for collision detection). 
                                           within r voxels. Removes leftover speckle while leaving palette
                                           entries exact and color boundaries crisp. Max 8; 0 disables.
                                           Default: off
-    --collision-voxels  <file.vox>      Also write the collision voxels as a MagicaVoxel .vox model, carrying
-                                          the same colors baked into the collision mesh. Requires a voxel/tris
-                                          collision mesh. Default: off
+    --collision-voxels  <file.vox>      Also write the collision voxels as a MagicaVoxel .vox model, coloured
+                                          per voxel straight from the splats. Needs no collision mesh.
+                                          Default: off
+    --collision-voxels-size    <size>   Voxel size for the .vox model only, so it can fit the format's
+                                          256-per-axis limit while the octree and collision mesh keep the finer
+                                          --voxel-params size. Rounded to a whole multiple of it.
+                                          Default: same as --voxel-params size
 ```
 
 The two spatial options are independent: `--collision-color-smooth` cleans the colors *before* the palette is built, `--collision-color-coherent` cleans the assignment *after*. Radii are in voxels, so they scale with `--voxel-params` size.
@@ -258,7 +262,29 @@ Smoothing runs at radius `2` by default whenever a palette is requested, because
 
 The filter is edge-preserving, so this costs very little detail: a vertex only averages neighbours already within about two just-noticeable differences of its own colour, which excludes anything across a material boundary. On the reference diorama, the default takes same-material colour changes from ~22% of neighbouring face pairs down to ~7% and isolated speckle from ~3.8% to ~0.7%, while *lowering* colour error both overall and at material boundaries. Raise it towards `3`–`4` for very noisy captures, or pass `0` to turn it off and get the previous behaviour. Add `--collision-color-coherent 1` on top to absorb any speckle that survives into the assignment.
 
-`--collision-voxels` emits the same voxels the collision mesh was built from, so the `.vox` opens in MagicaVoxel looking like the `.glb` — every colour option above applies to both. Two format limits apply: a model spans at most 256 voxels per axis (raise the voxel size in `--voxel-params` if you hit it) and holds at most 255 colours, so a palette larger than that, or no palette at all, is reduced to 255 for the `.vox` only. Because a MagicaVoxel voxel carries one colour while a mesh voxel has up to six independently coloured faces, each voxel takes the colour held by most of its faces.
+`--collision-voxels` writes the collision voxels as a MagicaVoxel model. Colours are sampled once per voxel, at its centre and using the average of its exposed face normals, then run through the same denoise and palette steps as the mesh — so every colour option above applies, and the `.vox` opens looking like the `.glb`. Sampling per voxel rather than per mesh vertex is both the natural granularity for the format (a MagicaVoxel voxel carries one colour) and far cheaper: on a 48 m landscape at 2 cm it is ~186K samples instead of ~18M, seconds instead of minutes. It also means the `.vox` needs no collision mesh at all — `--collision-voxels` works on its own.
+
+Two format limits apply. A model holds at most 255 colours, so a larger palette, or none, is reduced to 255 for the `.vox` only. And `XYZI` stores each coordinate in a single byte, so **a model spans at most 256 voxels per axis** — at 2 cm voxels that is a 5.12 m cube. This is checked immediately after the grid is cropped, before any colouring or mesh work, and the error names the smallest voxel size that would fit:
+
+```
+The .vox model would be 2332x809x2411 voxels, which exceeds the MagicaVoxel limit of
+256 per axis. The occupied region spans 46.6x16.2x48.2 world units, so the .vox needs
+a voxel size of at least 0.2. Pass --collision-voxels-size 0.2 to coarsen only the
+.vox and keep the collision grid, or raise --voxel-params to coarsen everything.
+```
+
+The suggested size is a whole multiple of the collision voxel size and is checked to fit, so it works first time.
+
+`--collision-voxels-size` is the usual answer: it decouples the `.vox` from the collision resolution, reducing the grid for the model only (a coarse voxel is solid when any fine voxel inside it is), so the octree and `.collision.glb` keep their detail.
+
+```bash
+# 2 cm octree and collision mesh, 20 cm .vox
+splat-transform landscape.spz landscape.voxel.json \
+    --voxel-params 0.02,0.1 \
+    --collision-voxels landscape.vox --collision-voxels-size 0.2
+```
+
+Note that collision *mesh* size grows with the square of the inverse voxel size: at 2 cm the landscape above is 36.8M triangles and a 2.06 GB `.glb`, which no engine will load usefully. Pick `--voxel-params` for the mesh you actually want and use `--collision-voxels-size` for the model.
 
 Palette selection deliberately favours hue coverage over per-vertex colour accuracy, so a small strongly-coloured feature is kept rather than averaged away. That balance is set by a handful of tuning constants at the top of [`src/lib/mesh/palette.ts`](src/lib/mesh/palette.ts) — how far lightness is discounted against chroma (`LIGHTNESS_WEIGHT`), candidate colour granularity (`L_BIN_STEP` / `AB_BIN_STEP`), and what separates a real region from scattered noise (`SUPPORT_*`). They were calibrated against one reference scene that is ~92% warm by vertex count, so a scene with a very different colour balance may want different values; that file documents each constant.
 
@@ -409,7 +435,7 @@ splat-transform gen-grid.mjs -p width=10,height=10,scale=10,color=0.1 scenes/gri
 
 ### Voxel Format
 
-The voxel format stores sparse voxel octree data for collision detection. It consists of two files: `.voxel.json` (metadata) and `.voxel.bin` (binary octree data). Pass `-K` to also emit a `.collision.glb` mesh derived from the voxel grid, and `--collision-voxels` to additionally write those voxels as a MagicaVoxel `.vox` model.
+The voxel format stores sparse voxel octree data for collision detection. It consists of two files: `.voxel.json` (metadata) and `.voxel.bin` (binary octree data). Pass `-K` to also emit a `.collision.glb` mesh derived from the voxel grid, and `--collision-voxels` to additionally write those voxels as a MagicaVoxel `.vox` model (optionally at a coarser size via `--collision-voxels-size`).
 
 For a step-by-step walkthrough of each option (with illustrations), see the [Collision Mesh Guide](https://developer.playcanvas.com/user-manual/splat-transform/collision/).
 
@@ -474,6 +500,16 @@ splat-transform -K voxel --collision-color solid --collision-color-flat \
 splat-transform -K voxel --collision-color solid --collision-color-flat \
     --collision-color-palette 16 --collision-color-coherent 1 \
     --collision-voxels output.vox \
+    input.ply output.voxel.json
+
+# MagicaVoxel model on its own - no collision mesh needed
+splat-transform --collision-color solid --collision-color-palette 24 \
+    --collision-voxels output.vox \
+    input.ply output.voxel.json
+
+# Fine octree, coarse .vox: the model fits 256 voxels per axis either way
+splat-transform --voxel-params 0.02,0.1 --collision-color-palette 24 \
+    --collision-voxels output.vox --collision-voxels-size 0.2 \
     input.ply output.voxel.json
 ```
 

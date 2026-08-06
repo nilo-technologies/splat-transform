@@ -188,6 +188,7 @@ const writeFile = async (writeOptions: WriteOptions, fs: FileSystem) => {
                 collisionColorSmooth: options.collisionColorSmooth,
                 collisionColorCoherent: options.collisionColorCoherent,
                 collisionVoxels: options.collisionVoxels,
+                collisionVoxelsSize: options.collisionVoxelsSize,
                 createDevice
             }, fs);
             break;

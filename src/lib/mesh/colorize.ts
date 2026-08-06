@@ -38,35 +38,116 @@ const srgbToLinear = (c: number): number => (c <= 0.04045 ? c / 12.92 : ((c + 0.
 
 const displayColor = (f_dc: TypedArray, idx: number): number => Math.min(Math.max(0.5 + SH_C0 * f_dc[idx], 0), 1);
 
+// Reusable scratch buffers. colorizeVertices runs once per mesh vertex, so on a
+// multi-million-vertex mesh anything allocated per vertex (a candidate array
+// from the BVH, one object per candidate per channel) dominates both time and
+// GC pressure. Everything below is grown on demand and then reused.
+let queryBuf = new Uint32Array(256);
+let gatedBuf = new Uint32Array(256);
+let inwardBuf = new Uint32Array(256);
+let valueBuf = new Float64Array(256);
+let weightBuf = new Float64Array(256);
+let orderBuf = new Int32Array(256);
+const orderList: number[] = [];
+
+// Above this candidate count the insertion sort below is replaced by a native
+// sort. Candidate sets are small in practice — a few dozen — but a dense region
+// can produce thousands, where an O(n^2) sort would dominate.
+const INSERTION_SORT_LIMIT = 96;
+
+/**
+ * Grow the per-candidate scratch buffers to hold at least `n` entries.
+ *
+ * @param n - Required capacity.
+ */
+const ensureCandidateScratch = (n: number): void => {
+    if (n <= valueBuf.length) return;
+    let cap = valueBuf.length;
+    while (cap < n) cap *= 2;
+    gatedBuf = new Uint32Array(cap);
+    inwardBuf = new Uint32Array(cap);
+    valueBuf = new Float64Array(cap);
+    weightBuf = new Float64Array(cap);
+    orderBuf = new Int32Array(cap);
+};
+
+/**
+ * Collect the splats whose AABB overlaps a box, into the shared query buffer.
+ *
+ * @param bvh - BVH over the gaussian AABBs.
+ * @param cx - Box centre X.
+ * @param cy - Box centre Y.
+ * @param cz - Box centre Z.
+ * @param radius - Box half-size.
+ * @returns Number of matches, written to `queryBuf[0..n)`.
+ */
+const queryBox = (
+    bvh: GaussianBVH,
+    cx: number, cy: number, cz: number,
+    radius: number
+): number => {
+    let n = bvh.queryOverlappingRawInto(
+        cx - radius, cy - radius, cz - radius,
+        cx + radius, cy + radius, cz + radius,
+        queryBuf, 0
+    );
+    if (n > queryBuf.length) {
+        let cap = queryBuf.length;
+        while (cap < n) cap *= 2;
+        queryBuf = new Uint32Array(cap);
+        n = bvh.queryOverlappingRawInto(
+            cx - radius, cy - radius, cz - radius,
+            cx + radius, cy + radius, cz + radius,
+            queryBuf, 0
+        );
+    }
+    return n;
+};
+
 /**
  * Opacity-weighted median of one display-color channel over the candidate
- * splats: sort candidates by channel value (ties broken by splat index for
- * determinism), accumulate `sigmoid(opacity)` in that order, and take the
- * first value whose cumulative weight reaches at least half the total.
+ * splats: order candidates by channel value, accumulate `sigmoid(opacity)` in
+ * that order, and take the first value whose cumulative weight reaches at least
+ * half the total.
  *
- * @param f_dc - SH DC column for the channel.
- * @param indices - Candidate splat indices.
- * @param opacity - Logit-encoded opacity column.
+ * Candidates of equal value are interchangeable here — whichever of them the
+ * cumulative sum crosses on, the value reported is the same — so no tie-break
+ * on splat index is needed and the ordering can be done in place.
+ *
+ * @param n - Number of candidates, with values in `valueBuf` and weights in
+ * `weightBuf`.
+ * @param totalWeight - Sum of `weightBuf[0..n)`.
  * @returns The weighted-median display color in [0, 1].
  */
-const weightedMedianColor = (f_dc: TypedArray, indices: number[], opacity: TypedArray): number => {
-    const pairs = indices.map(idx => ({
-        v: displayColor(f_dc, idx),
-        w: sigmoid(opacity[idx]),
-        i: idx
-    }));
-    pairs.sort((a, b) => (a.v - b.v) || (a.i - b.i));
+const weightedMedianOfScratch = (n: number, totalWeight: number): number => {
+    for (let i = 0; i < n; i++) orderBuf[i] = i;
 
-    let total = 0;
-    for (const p of pairs) total += p.w;
-
-    const half = total / 2;
-    let cum = 0;
-    for (const p of pairs) {
-        cum += p.w;
-        if (cum >= half) return p.v;
+    if (n <= INSERTION_SORT_LIMIT) {
+        for (let a = 1; a < n; a++) {
+            const t = orderBuf[a];
+            const tv = valueBuf[t];
+            let b = a - 1;
+            while (b >= 0 && valueBuf[orderBuf[b]] > tv) {
+                orderBuf[b + 1] = orderBuf[b];
+                b--;
+            }
+            orderBuf[b + 1] = t;
+        }
+    } else {
+        orderList.length = n;
+        for (let i = 0; i < n; i++) orderList[i] = i;
+        orderList.sort((a, b) => valueBuf[a] - valueBuf[b]);
+        for (let i = 0; i < n; i++) orderBuf[i] = orderList[i];
     }
-    return pairs[pairs.length - 1].v;
+
+    const half = totalWeight / 2;
+    let cum = 0;
+    for (let i = 0; i < n; i++) {
+        const o = orderBuf[i];
+        cum += weightBuf[o];
+        if (cum >= half) return valueBuf[o];
+    }
+    return valueBuf[orderBuf[n - 1]];
 };
 
 /**
@@ -122,10 +203,11 @@ const colorizeVertices = (
     const gate2 = gate * gate;
     const margin = INWARD_MARGIN * voxelResolution;
     const fallbackRadius = FALLBACK_RADIUS * voxelResolution;
+    const isAverage = mode === 'average';
 
-    // scratch buffers for the per-vertex filter stages
-    const gated: number[] = [];
-    const inward: number[] = [];
+    const bx = bvh.x;
+    const by = bvh.y;
+    const bz = bvh.z;
 
     for (let i = 0; i < positions.length; i += 3) {
         const px = positions[i];
@@ -136,76 +218,95 @@ const colorizeVertices = (
         const nz = normals[i + 2];
         const hasNormal = nx * nx + ny * ny + nz * nz > 1e-24;
 
-        const candidates = bvh.queryOverlappingRaw(
-            px - queryRadius, py - queryRadius, pz - queryRadius,
-            px + queryRadius, py + queryRadius, pz + queryRadius
-        );
+        let candidateCount = queryBox(bvh, px, py, pz, queryRadius);
+        ensureCandidateScratch(candidateCount);
 
         // distance gate
-        gated.length = 0;
-        for (const idx of candidates) {
-            const dx = bvh.x[idx] - px;
-            const dy = bvh.y[idx] - py;
-            const dz = bvh.z[idx] - pz;
+        let gatedCount = 0;
+        for (let c = 0; c < candidateCount; c++) {
+            const idx = queryBuf[c];
+            const dx = bx[idx] - px;
+            const dy = by[idx] - py;
+            const dz = bz[idx] - pz;
             if (dx * dx + dy * dy + dz * dz <= gate2) {
-                gated.push(idx);
+                gatedBuf[gatedCount++] = idx;
             }
         }
 
         // inward filter (skipped for vertices without a usable normal)
-        inward.length = 0;
+        let inwardCount = 0;
         if (hasNormal) {
-            for (const idx of gated) {
-                const dx = bvh.x[idx] - px;
-                const dy = bvh.y[idx] - py;
-                const dz = bvh.z[idx] - pz;
+            for (let c = 0; c < gatedCount; c++) {
+                const idx = gatedBuf[c];
+                const dx = bx[idx] - px;
+                const dy = by[idx] - py;
+                const dz = bz[idx] - pz;
                 if (dx * nx + dy * ny + dz * nz <= margin) {
-                    inward.push(idx);
+                    inwardBuf[inwardCount++] = idx;
                 }
             }
         }
 
         // fallback ladder
-        let selected: number[];
-        if (inward.length > 0) {
-            selected = inward;
-        } else if (gated.length > 0) {
-            selected = gated;
-        } else if (candidates.length > 0) {
-            selected = candidates;
+        let selected: Uint32Array;
+        let selectedCount: number;
+        if (inwardCount > 0) {
+            selected = inwardBuf;
+            selectedCount = inwardCount;
+        } else if (gatedCount > 0) {
+            selected = gatedBuf;
+            selectedCount = gatedCount;
+        } else if (candidateCount > 0) {
+            selected = queryBuf;
+            selectedCount = candidateCount;
         } else {
-            selected = bvh.queryOverlappingRaw(
-                px - fallbackRadius, py - fallbackRadius, pz - fallbackRadius,
-                px + fallbackRadius, py + fallbackRadius, pz + fallbackRadius
-            );
+            candidateCount = queryBox(bvh, px, py, pz, fallbackRadius);
+            ensureCandidateScratch(candidateCount);
+            selected = queryBuf;
+            selectedCount = candidateCount;
         }
 
         let cr = 0.5;
         let cg = 0.5;
         let cb = 0.5;
 
-        if (selected.length > 0) {
-            if (mode === 'average') {
+        if (selectedCount > 0) {
+            // opacity weights are shared by all three channels, so the sigmoid
+            // is evaluated once per candidate rather than once per channel
+            let totalWeight = 0;
+            for (let j = 0; j < selectedCount; j++) {
+                const w = sigmoid(opacity[selected[j]]);
+                weightBuf[j] = w;
+                totalWeight += w;
+            }
+
+            if (isAverage) {
                 let sumR = 0;
                 let sumG = 0;
                 let sumB = 0;
-                let sumW = 0;
-
-                for (const idx of selected) {
-                    const w = sigmoid(opacity[idx]);
+                for (let j = 0; j < selectedCount; j++) {
+                    const idx = selected[j];
+                    const w = weightBuf[j];
                     sumR += w * displayColor(f_dc_0, idx);
                     sumG += w * displayColor(f_dc_1, idx);
                     sumB += w * displayColor(f_dc_2, idx);
-                    sumW += w;
                 }
-
-                cr = sumR / sumW;
-                cg = sumG / sumW;
-                cb = sumB / sumW;
+                cr = sumR / totalWeight;
+                cg = sumG / totalWeight;
+                cb = sumB / totalWeight;
             } else {
-                cr = weightedMedianColor(f_dc_0, selected, opacity);
-                cg = weightedMedianColor(f_dc_1, selected, opacity);
-                cb = weightedMedianColor(f_dc_2, selected, opacity);
+                for (let j = 0; j < selectedCount; j++) {
+                    valueBuf[j] = displayColor(f_dc_0, selected[j]);
+                }
+                cr = weightedMedianOfScratch(selectedCount, totalWeight);
+                for (let j = 0; j < selectedCount; j++) {
+                    valueBuf[j] = displayColor(f_dc_1, selected[j]);
+                }
+                cg = weightedMedianOfScratch(selectedCount, totalWeight);
+                for (let j = 0; j < selectedCount; j++) {
+                    valueBuf[j] = displayColor(f_dc_2, selected[j]);
+                }
+                cb = weightedMedianOfScratch(selectedCount, totalWeight);
             }
         }
 

@@ -92,8 +92,11 @@ type Options = {
     /** After palette assignment, snap each vertex to the dominant palette color within this many voxels, removing isolated speckle. 0 disables it. Off by default. */
     collisionColorCoherent?: number;
 
-    /** Also write the collision voxels to this path as a MagicaVoxel `.vox` model, using the same colors baked into the collision mesh. Requires a `voxel`/`tris` collision mesh. */
+    /** Also write the collision voxels to this path as a MagicaVoxel `.vox` model. Colors are sampled per voxel straight from the splats, so no collision mesh is required. */
     collisionVoxels?: string;
+
+    /** Voxel size in world units for the `.vox` model only, letting it stay inside the format's 256-per-axis limit while the octree and collision mesh keep the finer `--voxel-params` size. Rounded to the nearest whole multiple of the collision voxel size. */
+    collisionVoxelsSize?: number;
 
     /** Camera projection for image output: `'pinhole'` (default) or `'equirect'` (360°×180° panorama). */
     renderProjection?: 'pinhole' | 'equirect';

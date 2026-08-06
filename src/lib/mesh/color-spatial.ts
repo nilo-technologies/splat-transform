@@ -1,4 +1,5 @@
 import { fromOklabArray, toOklabArray } from './oklab';
+import { IntKeyMap } from '../utils/int-key-map';
 
 /**
  * Spatial hash over mesh vertex positions, bucketed into cubic cells.
@@ -6,6 +7,14 @@ import { fromOklabArray, toOklabArray } from './oklab';
  * Cell coordinates are stored relative to the position bounds so bucket keys
  * stay exact non-negative integers; `dim` is the per-axis cell count used to
  * pack a 3D cell into a single key.
+ *
+ * Occupancy is held in compressed-row form — `cellOf` maps a packed cell key to
+ * a cell ordinal, `starts` gives that cell's slice of `entries` — rather than as
+ * a `Map<number, number[]>`. A per-cell JS array costs an allocation and a
+ * header per occupied cell, and on a fine grid the cell count approaches one
+ * per vertex, which both dominates memory and runs into V8's 2^24 `Map` entry
+ * cap. Vertices are filled in ascending order, so each cell's slice is ordered
+ * exactly as the pushed arrays were.
  */
 type VertexHash = {
     cellSize: number;
@@ -13,7 +22,9 @@ type VertexHash = {
     minY: number;
     minZ: number;
     dim: number;
-    buckets: Map<number, number[]>;
+    cellOf: IntKeyMap;
+    starts: Int32Array;
+    entries: Int32Array;
 };
 
 // Packing three cell coordinates into one exact double requires dim^3 to stay
@@ -60,21 +71,49 @@ const buildVertexHash = (positions: Float32Array, cellSize: number): VertexHash 
         dim = MAX_HASH_DIM;
     }
 
-    const buckets = new Map<number, number[]>();
-    for (let v = 0; v < vertexCount; v++) {
+    const keyOf = (v: number): number => {
         const cx = Math.floor((positions[v * 3] - minX) / cell);
         const cy = Math.floor((positions[v * 3 + 1] - minY) / cell);
         const cz = Math.floor((positions[v * 3 + 2] - minZ) / cell);
-        const key = cx + dim * (cy + dim * cz);
-        const bucket = buckets.get(key);
-        if (bucket) {
-            bucket.push(v);
+        return cx + dim * (cy + dim * cz);
+    };
+
+    // pass 1: assign a dense ordinal to every occupied cell and count it
+    const cellOf = new IntKeyMap(Math.ceil(vertexCount / 0.7));
+    let cellCount = 0;
+    let counts = new Int32Array(Math.max(16, vertexCount >> 3));
+    for (let v = 0; v < vertexCount; v++) {
+        const key = keyOf(v);
+        const slot = cellOf.slot(key);
+        let cell1;
+        if (cellOf.keys[slot] === -1) {
+            cell1 = cellCount++;
+            if (cell1 >= counts.length) {
+                const grown = new Int32Array(counts.length * 2);
+                grown.set(counts);
+                counts = grown;
+            }
+            cellOf.insertAt(slot, key, cell1);
         } else {
-            buckets.set(key, [v]);
+            cell1 = cellOf.values[slot];
         }
+        counts[cell1]++;
     }
 
-    return { cellSize: cell, minX, minY, minZ, dim, buckets };
+    // pass 2: prefix-sum into slice starts, then fill in ascending vertex order
+    const starts = new Int32Array(cellCount + 1);
+    for (let c = 0; c < cellCount; c++) {
+        starts[c + 1] = starts[c] + counts[c];
+    }
+    const cursor = counts.subarray(0, cellCount);
+    cursor.fill(0);
+    const entries = new Int32Array(vertexCount);
+    for (let v = 0; v < vertexCount; v++) {
+        const cell1 = cellOf.get(keyOf(v));
+        entries[starts[cell1] + cursor[cell1]++] = v;
+    }
+
+    return { cellSize: cell, minX, minY, minZ, dim, cellOf, starts, entries };
 };
 
 /**
@@ -94,7 +133,7 @@ const forEachNeighbor = (
     radius: number,
     fn: (neighbor: number) => void
 ): void => {
-    const { cellSize, minX, minY, minZ, dim, buckets } = hash;
+    const { cellSize, minX, minY, minZ, dim, cellOf, starts, entries } = hash;
     const px = positions[index * 3];
     const py = positions[index * 3 + 1];
     const pz = positions[index * 3 + 2];
@@ -114,9 +153,11 @@ const forEachNeighbor = (
             for (let dx = -reach; dx <= reach; dx++) {
                 const kx = cx + dx;
                 if (kx < 0 || kx >= dim) continue;
-                const bucket = buckets.get(kx + dim * (ky + dim * kz));
-                if (!bucket) continue;
-                for (const n of bucket) {
+                const cell = cellOf.get(kx + dim * (ky + dim * kz));
+                if (cell < 0) continue;
+                const end = starts[cell + 1];
+                for (let i = starts[cell]; i < end; i++) {
+                    const n = entries[i];
                     const ex = positions[n * 3] - px;
                     const ey = positions[n * 3 + 1] - py;
                     const ez = positions[n * 3 + 2] - pz;

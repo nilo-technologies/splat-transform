@@ -1,7 +1,8 @@
 import { basename } from 'pathe';
 import { Vec3 } from 'playcanvas';
 
-import { buildCollisionOutputs } from './collision-glb';
+import { buildCollisionMesh } from './collision-glb';
+import { assertVoxFits, buildCollisionVox, downsampleGrid, enumerateOccupied } from './collision-vox';
 import { logWrittenFile } from './utils';
 import { Column, DataTable, computeGaussianExtents, computeWriteTransform, transformColumns, type Bounds } from '../data-table';
 import { GpuDilation, GpuVoxelization } from '../gpu';
@@ -104,8 +105,11 @@ type WriteVoxelOptions = {
     /** After palette assignment, snap each vertex to the dominant palette color within this many voxels. Must be >= 0 and <= 8; 0 disables it. Default: off. */
     collisionColorCoherent?: number;
 
-    /** Path to also write the collision voxels to as a MagicaVoxel `.vox` model. Requires a `voxel`/`tris` collision mesh. Default: off. */
+    /** Path to also write the collision voxels to as a MagicaVoxel `.vox` model. Colours are sampled per voxel straight from the splats, so no collision mesh is required. Default: off. */
     collisionVoxels?: string;
+
+    /** Voxel size in world units for the `.vox` model only, letting it stay inside the format's 256-per-axis limit while the octree and collision mesh keep a finer `voxelResolution`. Rounded to the nearest whole multiple of `voxelResolution`. Default: same as `voxelResolution`. */
+    collisionVoxelsSize?: number;
 };
 
 /**
@@ -382,7 +386,8 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         collisionColorFlat = false,
         collisionColorSmooth,
         collisionColorCoherent,
-        collisionVoxels
+        collisionVoxels,
+        collisionVoxelsSize
     } = options;
 
     if (!createDevice) {
@@ -397,6 +402,16 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         throw new Error(`Invalid collisionMesh value: ${String(collisionMesh)}. Expected true, false, "smooth", "faces", "voxel", or "tris"`);
     })();
     const coloredCollisionMesh = collisionMeshShape === 'voxel' || collisionMeshShape === 'tris';
+    const emitVox = collisionVoxels !== undefined;
+
+    // The .vox colours voxels directly from the splats, so it needs the BVH and
+    // colour columns just as the coloured mesh shapes do.
+    const needsSplatColors = coloredCollisionMesh || emitVox;
+
+    if (collisionVoxelsSize !== undefined && !(collisionVoxelsSize >= voxelResolution)) {
+        throw new Error(
+            `collisionVoxelsSize must be >= voxelResolution (${voxelResolution}), got ${collisionVoxelsSize}`);
+    }
 
     if (Array.isArray(collisionColorPalette)) {
         if (collisionColorPalette.length === 0) {
@@ -435,7 +450,7 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         'rot_0', 'rot_1', 'rot_2', 'rot_3',
         'scale_0', 'scale_1', 'scale_2',
         'opacity',
-        ...(coloredCollisionMesh ? ['f_dc_0', 'f_dc_1', 'f_dc_2'] : [])
+        ...(needsSplatColors ? ['f_dc_0', 'f_dc_1', 'f_dc_2'] : [])
     ];
     const missingColumns = voxelColumns.filter(name => !dataTable.hasColumn(name));
     if (missingColumns.length > 0) {
@@ -497,7 +512,7 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         const buffer = await voxelizeToBuffer(
             bvh, gpuVoxelization, gridBounds, voxelResolution, opacityCutoff
         );
-        if (!coloredCollisionMesh) {
+        if (!needsSplatColors) {
             bvh = null;
             pcDataTable = null;
         }
@@ -577,14 +592,15 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
             cropToOccupied(grid, gridBounds, voxelResolution);
         grid = finalCrop.grid;
         gridBounds = finalCrop.gridBounds;
+        logger.debug(`grid: ${grid.nx} x ${grid.ny} x ${grid.nz} voxels @ ${voxelResolution}`);
         cropSub.end();
 
         gpuDilation?.destroy();
         gpuDilation = null;
 
-        // Colored shapes need the retained BVH and splat color columns to
-        // bake COLOR_0 vertex attributes; release both afterwards.
-        const colorSource = coloredCollisionMesh ? {
+        // Colored shapes and the .vox both need the retained BVH and splat
+        // color columns; release both once neither is outstanding.
+        const splatColors = needsSplatColors ? {
             bvh: bvh!,
             columns: {
                 f_dc_0: pcDataTable!.getColumnByName('f_dc_0')!.data,
@@ -594,15 +610,43 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
             },
             mode: collisionColorMode,
             palette: collisionColorPalette,
-            flatShade: collisionColorFlat,
             smoothRadius,
             coherentRadius: collisionColorCoherent
         } : null;
 
-        const emitVox = collisionVoxels !== undefined && coloredCollisionMesh;
-        const { glb: glbBytes, vox: voxBytes } = collisionMeshShape ?
-            buildCollisionOutputs(grid, gridBounds, voxelResolution, collisionMeshShape, colorSource, { emitVox }) :
-            { glb: null, vox: null };
+        // Validate the .vox up front: its 256-per-axis limit is decided by the
+        // cropped grid, so checking here costs microseconds and saves building
+        // a mesh and colouring millions of vertices only to fail afterwards.
+        let voxPlan: ReturnType<typeof downsampleGrid> | null = null;
+        if (emitVox) {
+            const factor = collisionVoxelsSize === undefined ?
+                1 :
+                Math.max(1, Math.round(collisionVoxelsSize / voxelResolution));
+            const occupied = enumerateOccupied(grid);
+            if (!occupied) {
+                logger.warn('no occupied voxels, skipping .vox output');
+            } else {
+                if (factor > 1) {
+                    const size = voxelResolution * factor;
+                    logger.info(`vox voxel size: ${size} (${factor}x the collision grid)`);
+                }
+                assertVoxFits(occupied, voxelResolution, factor);
+                voxPlan = downsampleGrid(grid, gridBounds, voxelResolution, factor);
+            }
+        }
+
+        const glbBytes = collisionMeshShape ?
+            buildCollisionMesh(grid, gridBounds, voxelResolution, collisionMeshShape,
+                coloredCollisionMesh ? { ...splatColors!, flatShade: collisionColorFlat } : null) :
+            null;
+
+        let voxBytes: Uint8Array | null = null;
+        if (voxPlan) {
+            const voxSub = logger.group('Collision voxels');
+            voxBytes = buildCollisionVox(
+                voxPlan.grid, voxPlan.gridBounds, voxPlan.voxelResolution, splatColors!);
+            voxSub.end();
+        }
         bvh = null;
         pcDataTable = null;
 

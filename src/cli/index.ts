@@ -151,6 +151,7 @@ const cliOptionsConfig = {
     'collision-color-smooth': { type: 'string' },
     'collision-color-coherent': { type: 'string' },
     'collision-voxels': { type: 'string' },
+    'collision-voxels-size': { type: 'string' },
     'projection': { type: 'string' },
     'camera': { type: 'string' },
     'look-at': { type: 'string' },
@@ -425,17 +426,38 @@ const parseArguments = async () => {
     }
 
     const collisionMesh = parseCollisionMesh(v['collision-mesh']);
+
+    const collisionVoxels: string | undefined = v['collision-voxels'];
+    if (collisionVoxels !== undefined && !collisionVoxels.toLowerCase().endsWith('.vox')) {
+        throw new Error(`Invalid collision-voxels value: ${collisionVoxels}. Must end in .vox`);
+    }
+
+    let collisionVoxelsSize: number | undefined;
+    if (v['collision-voxels-size'] !== undefined) {
+        collisionVoxelsSize = parseNumber(v['collision-voxels-size'], 0);
+        if (collisionVoxels === undefined) {
+            logger.warn('--collision-voxels-size has no effect without --collision-voxels.');
+            collisionVoxelsSize = undefined;
+        }
+    }
+
+    // The colour options feed the .vox as well as the coloured mesh shapes, so
+    // they only go unused when neither is requested.
+    const coloredMesh = collisionMesh === 'voxel' || collisionMesh === 'tris';
+    const usesSplatColors = coloredMesh || collisionVoxels !== undefined;
+    const colorOptionTarget = '--collision-mesh voxel/tris or --collision-voxels';
+
     let collisionColorMode = parseCollisionColorMode(v['collision-color']);
-    if (collisionColorMode !== undefined && (collisionMesh === false || collisionMesh === 'faces' || collisionMesh === 'smooth')) {
-        logger.warn('--collision-color only applies to voxel/tris collision meshes and will be ignored.');
+    if (collisionColorMode !== undefined && !usesSplatColors) {
+        logger.warn(`--collision-color only applies to ${colorOptionTarget} and will be ignored.`);
         collisionColorMode = undefined;
     }
 
     let collisionColorPalette: CollisionColorPalette | undefined;
     if (v['collision-color-palette'] !== undefined) {
         collisionColorPalette = parseCollisionColorPalette(v['collision-color-palette']);
-        if (collisionMesh === false || collisionMesh === 'faces' || collisionMesh === 'smooth') {
-            logger.warn('--collision-color-palette only applies to voxel/tris collision meshes and will be ignored.');
+        if (!usesSplatColors) {
+            logger.warn(`--collision-color-palette only applies to ${colorOptionTarget} and will be ignored.`);
             collisionColorPalette = undefined;
         }
     }
@@ -446,8 +468,8 @@ const parseArguments = async () => {
         if (!(radius >= 0) || radius > MAX_COLOR_RADIUS) {
             throw new Error(`Invalid ${name} value: ${raw}. Must be >= 0 and <= ${MAX_COLOR_RADIUS}.`);
         }
-        if (collisionMesh === false || collisionMesh === 'faces' || collisionMesh === 'smooth') {
-            logger.warn(`--${name} only applies to voxel/tris collision meshes and will be ignored.`);
+        if (!usesSplatColors) {
+            logger.warn(`--${name} only applies to ${colorOptionTarget} and will be ignored.`);
             return undefined;
         }
         return radius;
@@ -458,15 +480,8 @@ const parseArguments = async () => {
     const collisionColorSmooth = parseColorRadius('collision-color-smooth', v['collision-color-smooth']);
     const collisionColorCoherent = parseColorRadius('collision-color-coherent', v['collision-color-coherent']);
 
-    let collisionVoxels: string | undefined = v['collision-voxels'];
-    if (collisionVoxels !== undefined) {
-        if (!collisionVoxels.toLowerCase().endsWith('.vox')) {
-            throw new Error(`Invalid collision-voxels value: ${collisionVoxels}. Must end in .vox`);
-        }
-        if (collisionMesh === false || collisionMesh === 'faces' || collisionMesh === 'smooth') {
-            logger.warn('--collision-voxels only applies to voxel/tris collision meshes and will be ignored.');
-            collisionVoxels = undefined;
-        }
+    if (v['collision-color-flat'] !== undefined && v['collision-color-flat'] && !coloredMesh) {
+        logger.warn('--collision-color-flat only applies to --collision-mesh voxel/tris and will be ignored.');
     }
     const spzVersion = parseInteger(v['spz-version']);
     if (spzVersion !== 3 && spzVersion !== 4) {
@@ -589,6 +604,7 @@ const parseArguments = async () => {
         collisionColorSmooth,
         collisionColorCoherent,
         collisionVoxels,
+        collisionVoxelsSize,
         renderProjection,
         renderCameraPosition,
         renderLookAt,
@@ -890,7 +906,8 @@ VOXEL OUTPUT (.voxel.json)
         --collision-color-flat          Average each triangle's vertex colors for a uniform per-face flat colour. Default: false
         --collision-color-smooth    <r>   Edge-preserving denoise of vertex colors within r voxels before quantizing. Only perceptually similar neighbours are averaged, so material boundaries stay crisp. Default: 2 with --collision-color-palette, off otherwise. Use 0 to disable
         --collision-color-coherent  <r>   Snap each vertex to the dominant palette colour within r voxels, removing speckle. Default: off
-        --collision-voxels  <file.vox>    Also write the collision voxels as a MagicaVoxel .vox model, same colours as the mesh. Default: off
+        --collision-voxels  <file.vox>    Also write the collision voxels as a MagicaVoxel .vox model, coloured per voxel from the splats. Default: off
+        --collision-voxels-size <size>    Voxel size for the .vox only, so it can fit the format's 256-per-axis limit while the octree and collision mesh stay finer. Default: --voxel-params size
 
 IMAGE OUTPUT (.webp) — lossless WebP rendered via GPU rasterizer
         --projection       <pinhole|equirect>  Camera projection. Default: pinhole.

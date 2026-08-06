@@ -1,6 +1,7 @@
 import { BlockMaskBuffer } from './block-mask-buffer';
 import { popcount } from './morton';
 import { logger } from '../utils';
+import { IntKeyMap } from '../utils/int-key-map';
 
 // ============================================================================
 // Edge mask constants for 4x4x4 voxel blocks
@@ -55,13 +56,15 @@ function filterAndFillBlocks(
     const masks = mixed.masks;
     const bStride = nbx * nby;
 
-    // Build lookup structures from original (unmodified) data
-    const solidSet = new Set<number>();
+    // Build lookup structures from original (unmodified) data. A fine grid holds
+    // more blocks than V8 allows in a Set or Map (2^24), and block indices run
+    // past 32 bits, so these are open-addressed Float64-keyed tables.
+    const solidSet = new IntKeyMap(Math.ceil(Math.max(16, solid.length) / 0.7));
     for (let i = 0; i < solid.length; i++) {
-        solidSet.add(solid[i]);
+        solidSet.set(solid[i], 1);
     }
 
-    const mixedMap = new Map<number, number>();
+    const mixedMap = new IntKeyMap(Math.ceil(Math.max(16, mixed.blockIdx.length) / 0.7));
     for (let i = 0; i < mixed.blockIdx.length; i++) {
         mixedMap.set(mixed.blockIdx[i], i);
     }
@@ -195,8 +198,8 @@ function filterAndFillBlocks(
 function addCrossFace(
     nx: number, ny: number, nz: number,
     nbx: number, nby: number, nbz: number, bStride: number,
-    solidSet: Set<number>,
-    mixedMap: Map<number, number>,
+    solidSet: IntKeyMap,
+    mixedMap: IntKeyMap,
     masks: Uint32Array,
     ourFaceMask: number,
     adjFaceMask: number,
@@ -217,7 +220,7 @@ function addCrossFace(
     }
 
     const mIdx = mixedMap.get(adjIdx);
-    if (mIdx === undefined) {
+    if (mIdx === -1) {
         write(curLo, curHi);
         return;
     }
@@ -237,8 +240,8 @@ function addCrossFace(
 function addCrossFaceZ(
     nx: number, ny: number, nz: number,
     nbx: number, nby: number, nbz: number, bStride: number,
-    solidSet: Set<number>,
-    mixedMap: Map<number, number>,
+    solidSet: IntKeyMap,
+    mixedMap: IntKeyMap,
     masks: Uint32Array,
     plusZ: boolean,
     curLo: number, curHi: number,
@@ -260,7 +263,7 @@ function addCrossFaceZ(
     }
 
     const mIdx = mixedMap.get(adjIdx);
-    if (mIdx === undefined) {
+    if (mIdx === -1) {
         write(curLo, curHi);
         return;
     }

@@ -1,7 +1,6 @@
 import type { Bounds } from '../data-table';
 import { colorizeVertices, computeVertexNormals, coplanarMerge, mapToPalette, marchingCubes, palettizeColors, parsePaletteColors, smoothVertexColors, voxelFaces, type Mesh, type SplatColorColumns } from '../mesh';
 import type { GaussianBVH } from '../spatial';
-import { buildCollisionVox } from './collision-vox';
 import type { CollisionColorMode, CollisionColorPalette, CollisionMeshShape } from '../types';
 import { fmtCount, logger } from '../utils';
 import { SparseVoxelGrid } from '../voxel/sparse-voxel-grid';
@@ -187,26 +186,6 @@ function encodeGlb(positions: Float32Array, indices: Uint32Array, colors?: Float
 }
 
 /**
- * Extract a collision mesh from voxel data and encode it as a GLB file.
- *
- * Generates collision geometry from voxel data using either the smooth
- * marching-cubes path or a direct watertight voxel-face mesh.
- *
- * @param grid - Voxel grid after filtering / nav phases
- * @param gridBounds - Grid bounds aligned to block boundaries
- * @param voxelResolution - Size of each voxel in world units
- * @param shape - Collision mesh shape to generate: `faces` and `voxel` use
- * the voxel-face mesh, `smooth` and `tris` use marching cubes with coplanar
- * merging. `voxel` and `tris` also bake splat colors into a COLOR_0 vertex
- * attribute.
- * @param colorSource - Splat BVH, color columns, coloring mode, optional
- * palette quantisation, optional spatial smooth/coherence radii, and optional
- * flat-shade setting used to colorize mesh vertices. Required for the `voxel`
- * and `tris` shapes, ignored otherwise.
- * @returns GLB bytes, or null if no triangles were generated
- * @throws Error if shape is `voxel` or `tris` and `colorSource` is null
- */
-/**
  * Write one uniform colour for a face into `out`.
  *
  * Averaging is right for continuous vertex colours, but once colours have been
@@ -258,7 +237,47 @@ const writeFaceColor = (
     }
 };
 
-const buildCollisionOutputs = (
+
+/**
+ * Write the flat colour of a single triangle into `out`.
+ *
+ * @param t - Triangle index.
+ * @param indices - Mesh index buffer.
+ * @param src - Per-vertex colour triplets.
+ * @param out - Destination triplet, written at offset 0.
+ * @param quantized - True when `src` holds palette colours.
+ */
+const writeFaceColorOfTri = (
+    t: number,
+    indices: Uint32Array,
+    src: Float32Array,
+    out: Float32Array,
+    quantized: boolean
+): void => {
+    writeFaceColor([indices[t * 3], indices[t * 3 + 1], indices[t * 3 + 2]], src, out, 0, quantized);
+};
+
+/**
+ * Extract a collision mesh from voxel data and encode it as a GLB file.
+ *
+ * Generates collision geometry from voxel data using either the smooth
+ * marching-cubes path or a direct watertight voxel-face mesh.
+ *
+ * @param grid - Voxel grid after filtering / nav phases
+ * @param gridBounds - Grid bounds aligned to block boundaries
+ * @param voxelResolution - Size of each voxel in world units
+ * @param shape - Collision mesh shape to generate: `faces` and `voxel` use
+ * the voxel-face mesh, `smooth` and `tris` use marching cubes with coplanar
+ * merging. `voxel` and `tris` also bake splat colors into a COLOR_0 vertex
+ * attribute.
+ * @param colorSource - Splat BVH, color columns, coloring mode, optional
+ * palette quantisation, optional spatial smooth/coherence radii, and optional
+ * flat-shade setting used to colorize mesh vertices. Required for the `voxel`
+ * and `tris` shapes, ignored otherwise.
+ * @returns GLB bytes, or null if no triangles were generated
+ * @throws Error if shape is `voxel` or `tris` and `colorSource` is null
+ */
+const buildCollisionMesh = (
     grid: SparseVoxelGrid,
     gridBounds: Bounds,
     voxelResolution: number,
@@ -271,9 +290,8 @@ const buildCollisionOutputs = (
         flatShade?: boolean;
         smoothRadius?: number;
         coherentRadius?: number;
-    } | null = null,
-    opts: { emitVox?: boolean } = {}
-): { glb: Uint8Array | null; vox: Uint8Array | null } => {
+    } | null = null
+): Uint8Array | null => {
     const g = logger.group('Collision mesh');
 
     const colored = shape === 'voxel' || shape === 'tris';
@@ -310,7 +328,7 @@ const buildCollisionOutputs = (
     if (finalMesh.indices.length < 3) {
         logger.warn('no triangles generated, skipping GLB output');
         g.end();
-        return { glb: null, vox: null };
+        return null;
     }
 
     let colors: Float32Array | undefined;
@@ -319,12 +337,19 @@ const buildCollisionOutputs = (
             throw new Error(`colorSource is required for collision mesh shape '${shape}'`);
         }
         const colorSub = logger.group('Coloring vertices');
+        const normalsSub = logger.group('Vertex normals');
         const normals = computeVertexNormals(finalMesh.positions, finalMesh.indices);
+        normalsSub.end();
+
+        const sampleSub = logger.group('Sampling splats');
         colors = colorizeVertices(finalMesh.positions, normals, colorSource.bvh, colorSource.columns, voxelResolution, colorSource.mode);
+        sampleSub.end();
 
         if (colorSource.smoothRadius !== undefined && colorSource.smoothRadius > 0) {
+            const smoothSub = logger.group('Denoising');
             colors = smoothVertexColors(colors, finalMesh.positions, colorSource.smoothRadius, voxelResolution);
             logger.info(`denoised: ${colorSource.smoothRadius} voxel radius`);
+            smoothSub.end();
         }
 
         const palette = colorSource.palette;
@@ -338,12 +363,16 @@ const buildCollisionOutputs = (
         if (Array.isArray(palette) && palette.length >= 1) {
             // fixed palette: the colours are given, so there is nothing to
             // cluster — every vertex just takes its nearest entry
+            const paletteSub = logger.group('Palette');
             colors = mapToPalette(colors, parsePaletteColors(palette), paletteOpts);
             logger.info(`palette: ${palette.length} fixed colours`);
+            paletteSub.end();
             quantized = true;
         } else if (typeof palette === 'number' && palette >= 1) {
+            const paletteSub = logger.group('Palette');
             colors = palettizeColors(colors, palette, paletteOpts);
             logger.info(`palette: ${palette} colours`);
+            paletteSub.end();
             quantized = true;
         }
 
@@ -352,183 +381,160 @@ const buildCollisionOutputs = (
         }
 
         if (colorSource.flatShade) {
+            const flatSub = logger.group('Flat shading');
             const isVoxel = shape === 'voxel';
             const numTris = finalMesh.indices.length / 3;
+            const srcPositions = finalMesh.positions;
+            const srcIndices = finalMesh.indices;
+            const srcColors = colors;
 
-            // per-quad colours for voxel faces (each quad = 2 triangles)
-            let quadColor: Float32Array | null = null;
-            if (isVoxel) {
-                // build an edge map to find the two triangles forming each
-                // voxel quad. The diagonal edge has length ≈ √2·voxelResolution
-                // in world space; perimeter edges are exactly voxelResolution.
-                const edgeKey = (a: number, b: number): number => (a < b ? a * 0x100000000 + b : b * 0x100000000 + a);
+            // Flat shading needs a colour per face, so vertices shared between
+            // faces of different colours have to be split. For voxel quads the
+            // split unit is the quad, not the triangle: its two triangles share
+            // one colour and an edge, so 4 vertices suffice where un-indexing
+            // per triangle would emit 6. That is a third of the position and
+            // colour data on a mesh where those arrays run to gigabytes.
+            //
+            // voxelFaces(perVoxel) emits the two triangles of every quad
+            // consecutively, so pairing is positional. The edge map this
+            // replaced needed an entry per mesh edge, which both blew V8's 2^24
+            // Map cap and allocated an object plus an array per edge.
+            const pairStride = isVoxel ? 2 : 1;
 
-                interface EdgeInfo { tris: number[]; len2: number }
+            // scratch for one face's vertex indices: up to 4 for a quad
+            const faceVerts: number[] = [];
 
-                const edgeToInfo = new Map<number, EdgeInfo>();
-                for (let t = 0; t < numTris; t++) {
-                    const a = finalMesh.indices[t * 3];
-                    const b = finalMesh.indices[t * 3 + 1];
-                    const c = finalMesh.indices[t * 3 + 2];
-                    for (const [u, v] of [[a, b], [b, c], [c, a]]) {
-                        const k = edgeKey(u, v);
-                        let info = edgeToInfo.get(k);
-                        if (!info) {
-                            const uOff = u * 3, vOff = v * 3;
-                            const dx = finalMesh.positions[uOff] - finalMesh.positions[vOff];
-                            const dy = finalMesh.positions[uOff + 1] - finalMesh.positions[vOff + 1];
-                            const dz = finalMesh.positions[uOff + 2] - finalMesh.positions[vOff + 2];
-                            info = { tris: [], len2: dx * dx + dy * dy + dz * dz };
-                            edgeToInfo.set(k, info);
-                        }
-                        info.tris.push(t);
+            /**
+             * Vertex indices of the face starting at triangle `t`, and whether
+             * its triangles could be welded into a single quad.
+             *
+             * @param t - First triangle of the face.
+             * @returns True when `t` and `t + 1` form a 4-vertex quad.
+             */
+            const collectFace = (t: number): boolean => {
+                const a = srcIndices[t * 3];
+                const b = srcIndices[t * 3 + 1];
+                const c = srcIndices[t * 3 + 2];
+                faceVerts.length = 3;
+                faceVerts[0] = a;
+                faceVerts[1] = b;
+                faceVerts[2] = c;
+                if (pairStride !== 2 || t + 1 >= numTris) return false;
+                let extras = 0;
+                let extra = -1;
+                for (let k = 0; k < 3; k++) {
+                    const v = srcIndices[(t + 1) * 3 + k];
+                    if (v !== a && v !== b && v !== c) {
+                        extras++;
+                        extra = v;
                     }
                 }
+                if (extras !== 1) return false;
+                faceVerts.push(extra);
+                return true;
+            };
 
-                // pair triangles by the diagonal edge (the longer edge shared
-                // by exactly two triangles)
-                const quadPartner = new Int32Array(numTris).fill(-1);
-                for (const info of edgeToInfo.values()) {
-                    if (info.tris.length === 2 && info.tris[0] !== info.tris[1]) {
-                        // diagonal is approx √2 * voxelResolution long
-                        if (info.len2 > voxelResolution * voxelResolution * 1.5) {
-                            const t = info.tris[0];
-                            const s = info.tris[1];
-                            quadPartner[t] = s;
-                            quadPartner[s] = t;
-                        }
+            // Pass 1: size the output exactly. Growing a multi-gigabyte typed
+            // array by doubling would transiently hold both copies.
+            let outVertexCount = 0;
+            let outTriCount = 0;
+            for (let t = 0; t < numTris; t += pairStride) {
+                if (collectFace(t)) {
+                    outVertexCount += 4;
+                    outTriCount += 2;
+                } else {
+                    outVertexCount += 3;
+                    outTriCount += 1;
+                    if (pairStride === 2 && t + 1 < numTris) {
+                        // a partner that would not weld is emitted on its own,
+                        // so it needs its own three vertices
+                        outVertexCount += 3;
+                        outTriCount += 1;
                     }
                 }
-
-                // per-quad uniform colour: average the 4 vertex colours
-                quadColor = new Float32Array(numTris * 3);
-                const visited = new Uint8Array(numTris);
-                for (let t = 0; t < numTris; t++) {
-                    if (visited[t]) continue;
-                    const partner = quadPartner[t];
-                    let allVerts: number[];
-                    if (partner !== -1 && !visited[partner]) {
-                        // this triangle + its partner form a quad;
-                        // collect the 4 unique vertex indices
-                        const a = finalMesh.indices[t * 3];
-                        const b = finalMesh.indices[t * 3 + 1];
-                        const c = finalMesh.indices[t * 3 + 2];
-                        const dSet = new Set([a, b, c]);
-                        const partnerVerts = [
-                            finalMesh.indices[partner * 3],
-                            finalMesh.indices[partner * 3 + 1],
-                            finalMesh.indices[partner * 3 + 2]
-                        ];
-                        const extra = partnerVerts.filter(v => !dSet.has(v));
-                        allVerts = [a, b, c, ...extra];
-                        visited[partner] = 1;
-                    } else {
-                        allVerts = [
-                            finalMesh.indices[t * 3],
-                            finalMesh.indices[t * 3 + 1],
-                            finalMesh.indices[t * 3 + 2]
-                        ];
-                    }
-                    visited[t] = 1;
-
-                    // one uniform colour across the quad's vertices
-                    const vOff = t * 3;
-                    const partnerOff = partner !== -1 ? partner * 3 : -1;
-                    writeFaceColor(allVerts, colors, quadColor, vOff, quantized);
-                    if (partnerOff >= 0) {
-                        quadColor[partnerOff] = quadColor[vOff];
-                        quadColor[partnerOff + 1] = quadColor[vOff + 1];
-                        quadColor[partnerOff + 2] = quadColor[vOff + 2];
-                    }
-                }
-
-                // assign the quad colour to all 4 (or 3) vertices when
-                // un-indexing below
-                colors = quadColor;
             }
 
-            const flatPositions = new Float32Array(numTris * 9);
-            const flatIndices = new Uint32Array(numTris * 3);
-            const flatColors = new Float32Array(numTris * 9);
+            const flatPositions = new Float32Array(outVertexCount * 3);
+            const flatColors = new Float32Array(outVertexCount * 3);
+            const flatIndices = new Uint32Array(outTriCount * 3);
 
-            for (let t = 0; t < numTris; t++) {
-                const a = finalMesh.indices[t * 3];
-                const b = finalMesh.indices[t * 3 + 1];
-                const c = finalMesh.indices[t * 3 + 2];
+            const faceColor = new Float32Array(3);
+            let vw = 0;
+            let iw = 0;
 
-                // duplicate positions per triangle
-                for (let k = 0; k < 3; k++) {
-                    flatPositions[t * 9 + k] = finalMesh.positions[a * 3 + k];
-                    flatPositions[t * 9 + 3 + k] = finalMesh.positions[b * 3 + k];
-                    flatPositions[t * 9 + 6 + k] = finalMesh.positions[c * 3 + k];
+            for (let t = 0; t < numTris; t += pairStride) {
+                const welded = collectFace(t);
+                const count = welded ? 4 : 3;
+                const base = vw;
+
+                writeFaceColor(faceVerts, srcColors, faceColor, 0, quantized);
+
+                for (let k = 0; k < count; k++) {
+                    const v = faceVerts[k];
+                    flatPositions[(base + k) * 3] = srcPositions[v * 3];
+                    flatPositions[(base + k) * 3 + 1] = srcPositions[v * 3 + 1];
+                    flatPositions[(base + k) * 3 + 2] = srcPositions[v * 3 + 2];
+                    flatColors[(base + k) * 3] = faceColor[0];
+                    flatColors[(base + k) * 3 + 1] = faceColor[1];
+                    flatColors[(base + k) * 3 + 2] = faceColor[2];
                 }
+                vw += count;
 
-                // per-face uniform colour: for voxel the pre-computed quadColor
-                // array already holds the value at t*3; for tris collapse the 3
-                // vertex colours
-                const tOff = t * 3;
-                const face = [0, 0, 0];
-                if (isVoxel) {
-                    face[0] = colors[tOff];
-                    face[1] = colors[tOff + 1];
-                    face[2] = colors[tOff + 2];
-                } else {
-                    const tmp = new Float32Array(3);
-                    writeFaceColor([a, b, c], colors, tmp, 0, quantized);
-                    face[0] = tmp[0];
-                    face[1] = tmp[1];
-                    face[2] = tmp[2];
-                }
-                for (let ch = 0; ch < 3; ch++) {
-                    flatColors[t * 9 + ch] = face[ch];
-                    flatColors[t * 9 + 3 + ch] = face[ch];
-                    flatColors[t * 9 + 6 + ch] = face[ch];
-                }
+                // first triangle keeps its winding
+                flatIndices[iw++] = base;
+                flatIndices[iw++] = base + 1;
+                flatIndices[iw++] = base + 2;
 
-                flatIndices[t * 3] = t * 3;
-                flatIndices[t * 3 + 1] = t * 3 + 1;
-                flatIndices[t * 3 + 2] = t * 3 + 2;
+                if (welded) {
+                    // remap the partner through the same 4 vertices, so its
+                    // winding survives without duplicating them
+                    for (let k = 0; k < 3; k++) {
+                        const v = srcIndices[(t + 1) * 3 + k];
+                        let local = 3;
+                        for (let j = 0; j < 4; j++) {
+                            if (faceVerts[j] === v) {
+                                local = j;
+                                break;
+                            }
+                        }
+                        flatIndices[iw++] = base + local;
+                    }
+                } else if (pairStride === 2 && t + 1 < numTris) {
+                    // an unpaired partner still needs emitting, on its own
+                    const pBase = vw;
+                    writeFaceColorOfTri(t + 1, srcIndices, srcColors, faceColor, quantized);
+                    for (let k = 0; k < 3; k++) {
+                        const v = srcIndices[(t + 1) * 3 + k];
+                        flatPositions[(pBase + k) * 3] = srcPositions[v * 3];
+                        flatPositions[(pBase + k) * 3 + 1] = srcPositions[v * 3 + 1];
+                        flatPositions[(pBase + k) * 3 + 2] = srcPositions[v * 3 + 2];
+                        flatColors[(pBase + k) * 3] = faceColor[0];
+                        flatColors[(pBase + k) * 3 + 1] = faceColor[1];
+                        flatColors[(pBase + k) * 3 + 2] = faceColor[2];
+                    }
+                    vw += 3;
+                    flatIndices[iw++] = pBase;
+                    flatIndices[iw++] = pBase + 1;
+                    flatIndices[iw++] = pBase + 2;
+                }
             }
 
             finalMesh = { positions: flatPositions, indices: flatIndices };
             colors = flatColors;
             logger.info(isVoxel ?
-                'flat-shading: per-voxel-quad colours, un-indexed' :
-                'flat-shading: per-triangle colours, un-indexed');
+                `flat-shading: per-voxel-quad colours, ${fmtCount(outVertexCount)} vertices` :
+                `flat-shading: per-triangle colours, ${fmtCount(outVertexCount)} vertices`);
+            flatSub.end();
         }
         colorSub.end();
     }
 
-    // built from the finished mesh and colours, so the .vox carries whatever
-    // the palette and spatial options produced for the GLB
-    const vox = opts.emitVox && colors ?
-        buildCollisionVox(grid, gridBounds, voxelResolution, finalMesh, colors) :
-        null;
+    const encodeSub = logger.group('Encoding GLB');
+    const glb = encodeGlb(finalMesh.positions, finalMesh.indices, colors);
+    encodeSub.end();
 
     g.end();
-    return { glb: encodeGlb(finalMesh.positions, finalMesh.indices, colors), vox };
+    return glb;
 };
 
-/**
- * Extract a collision mesh from voxel data and encode it as a GLB file.
- *
- * Thin wrapper over `buildCollisionOutputs` for callers that only want the GLB.
- *
- * @param grid - Voxel grid after filtering / nav phases
- * @param gridBounds - Grid bounds aligned to block boundaries
- * @param voxelResolution - Size of each voxel in world units
- * @param shape - Collision mesh shape to generate
- * @param colorSource - Colour inputs; required for the `voxel` and `tris` shapes
- * @returns GLB bytes, or null if no triangles were generated
- */
-const buildCollisionMesh = (
-    grid: SparseVoxelGrid,
-    gridBounds: Bounds,
-    voxelResolution: number,
-    shape: CollisionMeshShape = 'smooth',
-    colorSource: Parameters<typeof buildCollisionOutputs>[4] = null
-): Uint8Array | null => {
-    return buildCollisionOutputs(grid, gridBounds, voxelResolution, shape, colorSource).glb;
-};
-
-export { buildCollisionMesh, buildCollisionOutputs };
+export { buildCollisionMesh };

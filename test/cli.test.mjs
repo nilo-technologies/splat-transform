@@ -360,7 +360,23 @@ describe('CLI parsing', () => {
         assert.match(result.stderr, /\.vox/);
     });
 
-    it('warns and ignores --collision-voxels without a coloured mesh', async () => {
+    it('accepts --collision-voxels without any collision mesh', async () => {
+        // colours are sampled per voxel from the splats, so the .vox no longer
+        // depends on a coloured mesh existing
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-voxels',
+            'model.vox',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+        assert.doesNotMatch(result.stderr, /ignored/i);
+    });
+
+    it('accepts --collision-voxels alongside an uncoloured mesh', async () => {
         const result = await runCli([
             '--gpu',
             'cpu',
@@ -373,7 +389,37 @@ describe('CLI parsing', () => {
         ]);
 
         assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
-        assert.match(result.stderr, /--collision-voxels.*ignored/i);
+        assert.doesNotMatch(result.stderr, /ignored/i);
+    });
+
+    it('warns that --collision-voxels-size needs --collision-voxels', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-voxels-size',
+            '0.2',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+        assert.match(result.stderr, /--collision-voxels-size.*no effect/i);
+    });
+
+    it('accepts --collision-voxels-size with --collision-voxels', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--collision-voxels',
+            'model.vox',
+            '--collision-voxels-size',
+            '0.2',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+        assert.doesNotMatch(result.stderr, /ignored|no effect/i);
     });
 
     it('accepts --collision-voxels with a coloured mesh', async () => {

@@ -8,3 +8,4 @@ export { RotateSH } from './rotate-sh';
 export { TextRenderer } from './text-renderer';
 export type { TextRendererOptions } from './text-renderer';
 export { WebPCodec } from './webp-codec';
+export { IntKeyMap } from './int-key-map';

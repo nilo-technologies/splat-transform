@@ -44,6 +44,25 @@ const LIGHTNESS_WEIGHT = 0.2;
 
 // Candidate bin size in Oklab. Deliberately below one just-noticeable
 // difference, so averaging within a bin denoises without blending hues.
+// Per-axis span of packed candidate bin keys. Oklab for clamped sRGB keeps
+// every axis well inside +-20 bins, so 2048 leaves ample headroom while
+// 2048^3 stays exactly representable as a double.
+const BIN_AXIS_RANGE = 2048;
+const BIN_AXIS_HALF = BIN_AXIS_RANGE >> 1;
+
+/**
+ * Bin index for one Oklab axis, offset to a non-negative integer.
+ *
+ * @param value - Axis value.
+ * @param step - Bin width.
+ * @returns Non-negative bin index in `[0, BIN_AXIS_RANGE)`.
+ */
+const binIndex = (value: number, step: number): number => {
+    const raw = Math.floor(value / step);
+    if (!Number.isFinite(raw)) return BIN_AXIS_HALF;
+    return Math.min(BIN_AXIS_RANGE - 1, Math.max(0, raw + BIN_AXIS_HALF));
+};
+
 const L_BIN_STEP = 0.05;
 const AB_BIN_STEP = 0.02;
 
@@ -121,7 +140,7 @@ const buildCandidates = (
     positions: Float32Array | undefined,
     voxelResolution: number | undefined
 ): CandidateBin[] => {
-    const bins = new Map<string, CandidateBin>();
+    const bins = new Map<number, CandidateBin>();
     const binOf = new Int32Array(vertexCount);
     const order: CandidateBin[] = [];
 
@@ -129,7 +148,13 @@ const buildCandidates = (
         const L = oklab[v * 3];
         const A = oklab[v * 3 + 1];
         const B = oklab[v * 3 + 2];
-        const key = `${Math.floor(L / L_BIN_STEP)}_${Math.floor(A / AB_BIN_STEP)}_${Math.floor(B / AB_BIN_STEP)}`;
+        // Packed integer bin key. A template-string key costs one string
+        // allocation per vertex, which on a multi-million-vertex mesh dominates
+        // this loop. BIN_AXIS_RANGE is far wider than the Oklab gamut of
+        // clamped sRGB, so the clamp only ever catches non-finite input.
+        const key =
+            (binIndex(L, L_BIN_STEP) * BIN_AXIS_RANGE + binIndex(A, AB_BIN_STEP)) * BIN_AXIS_RANGE +
+            binIndex(B, AB_BIN_STEP);
         let bin = bins.get(key);
         if (!bin) {
             bin = { id: order.length, count: 0, supported: 0, sumL: 0, sumA: 0, sumB: 0, L: 0, A: 0, B: 0 };

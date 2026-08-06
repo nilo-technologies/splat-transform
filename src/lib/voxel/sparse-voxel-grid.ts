@@ -491,6 +491,72 @@ class SparseVoxelGrid {
     }
 
     /**
+     * Visit every occupied voxel.
+     *
+     * Iterates the packed block-type words and skips empty words wholesale, so
+     * cost scales with the number of occupied blocks rather than with grid
+     * volume. A dense `for iz/iy/ix` walk calling `getVoxel` is `nx*ny*nz`
+     * work, which reaches billions of iterations on fine grids.
+     *
+     * Visit order is block order — Z-major over blocks, then Y, then X, and
+     * Z/Y/X within each block — not global raster order.
+     *
+     * @param cb - Receives each occupied voxel coordinate.
+     */
+    forEachOccupiedVoxel(cb: (ix: number, iy: number, iz: number) => void): void {
+        const { nbx, nby, nbz, types, masks } = this;
+        const totalBlocks = nbx * nby * nbz;
+
+        for (let w = 0; w < types.length; w++) {
+            const word = types[w];
+            if (word === 0) continue;
+            let nonEmpty = ((word & EVEN_BITS) | ((word >>> 1) & EVEN_BITS)) >>> 0;
+            const baseBlockIdx = w * BLOCKS_PER_WORD;
+            while (nonEmpty) {
+                const bp = 31 - Math.clz32(nonEmpty & -nonEmpty);
+                const lane = bp >>> 1;
+                const blockIdx = baseBlockIdx + lane;
+                nonEmpty &= nonEmpty - 1;
+                if (blockIdx >= totalBlocks) break;
+
+                const bx = blockIdx % nbx;
+                const byBz = (blockIdx / nbx) | 0;
+                const by = byBz % nby;
+                const bz = (byBz / nby) | 0;
+                const x0 = bx << 2;
+                const y0 = by << 2;
+                const z0 = bz << 2;
+
+                if (((word >>> (lane << 1)) & 3) === BLOCK_SOLID) {
+                    for (let lz = 0; lz < 4; lz++) {
+                        for (let ly = 0; ly < 4; ly++) {
+                            for (let lx = 0; lx < 4; lx++) {
+                                cb(x0 + lx, y0 + ly, z0 + lz);
+                            }
+                        }
+                    }
+                } else {
+                    const s = masks.slot(blockIdx);
+                    const lo = masks.lo[s];
+                    const hi = masks.hi[s];
+                    for (let lz = 0; lz < 4; lz++) {
+                        const bits = lz < 2 ? lo : hi;
+                        const base = (lz & 1) << 4;
+                        for (let ly = 0; ly < 4; ly++) {
+                            const rowBase = base + (ly << 2);
+                            for (let lx = 0; lx < 4; lx++) {
+                                if (((bits >>> (rowBase + lx)) & 1) !== 0) {
+                                    cb(x0 + lx, y0 + ly, z0 + lz);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Get the bounding box of occupied blocks.
      *
      * @param onProgress - Optional progress callback over `types` words.

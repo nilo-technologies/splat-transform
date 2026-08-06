@@ -1,5 +1,6 @@
 import type { Bounds } from '../data-table';
 import type { Mesh } from './marching-cubes';
+import { IntKeyMap } from '../utils/int-key-map';
 import {
     BLOCK_EMPTY,
     BLOCK_SOLID,
@@ -12,46 +13,53 @@ import {
 const HASH_MUL = 0x9E3779B9;
 
 /**
- * Extract a watertight voxel-boundary mesh from a SparseVoxelGrid.
+ * Corner offsets of each voxel face, as `(dx, dy, dz)` triplets for corners
+ * `a, b, c, d` in local counter-clockwise order.
  *
- * By default exposed voxel faces are first greedily merged into larger
- * axis-aligned rectangles before triangulation, reducing triangle count.
- * When `opts.perVoxel` is true each visible voxel face stays its own
- * 1×1 quad — no merging.
- *
- * @param grid - Voxel grid after filtering / nav phases.
- * @param gridBounds - Grid bounds aligned to block boundaries.
- * @param voxelResolution - Size of each voxel in world units.
- * @param opts - Optional flags.
- * @param opts.perVoxel - Emit one 1×1 quad per visible voxel face instead
- * of greedily merging coplanar neighbours. Defaults to false.
- * @returns Mesh with positions and indices.
+ * Buckets are `-X, +X, -Y, +Y, -Z, +Z`. These reproduce exactly what the
+ * greedy path's `globalPoint()` yields for a 1x1 rectangle, so the per-voxel
+ * fast path and the merge path agree on winding.
  */
-const voxelFaces = (
+const QUAD_CORNERS = [
+    [0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1], // -X
+    [1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1], // +X
+    [0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1], // -Y
+    [0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1], // +Y
+    [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0], // -Z
+    [0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1]  // +Z
+];
+
+/**
+ * Whether a bucket's local counter-clockwise order already faces outward.
+ *
+ * Matches `positive === (axis !== 1)` in the merge path: the local `(u, v)`
+ * frame is left-handed for the Y axis, so the Y buckets are inverted relative
+ * to X and Z.
+ */
+const QUAD_LOCAL_CCW = [false, true, true, false, false, true];
+
+// Ear-clipping a 4-gon `[a, b, c, d]` yields `(d, a, b)` then `(b, c, d)`.
+// Preserved verbatim so output stays identical to the greedy path.
+const QUAD_TRIS_CCW = [3, 0, 1, 1, 2, 3];
+const QUAD_TRIS_CW = [3, 1, 0, 1, 3, 2];
+
+/**
+ * Visit every voxel face exposed to empty space, or to outside the grid.
+ *
+ * Iterates the packed block-type words, skipping empty words wholesale, so
+ * cost scales with occupied blocks rather than with grid volume. Solid blocks
+ * only test their six neighbours; mixed blocks test per voxel.
+ *
+ * @param grid - Voxel grid to scan.
+ * @param cb - Receives the voxel coordinate and the face bucket
+ * (`0..5` = `-X, +X, -Y, +Y, -Z, +Z`).
+ */
+const forEachExposedFace = (
     grid: SparseVoxelGrid,
-    gridBounds: Bounds,
-    voxelResolution: number,
-    opts?: { perVoxel?: boolean }
-): Mesh => {
-    const perVoxel = opts?.perVoxel === true;
+    cb: (ix: number, iy: number, iz: number, bucket: number) => void
+): void => {
     const { nbx, nby, nbz, bStride, types, masks, nx, ny, nz } = grid;
     const totalBlocks = nbx * nby * nbz;
-    const coordStride = Math.max(nx, ny, nz) + 1;
-
-    let faceCap = 1024;
-    let faceLen = 0;
-    let faceKeys = new Float64Array(faceCap);
-
-    const addFace = (bucket: number, p: number, u: number, v: number): void => {
-        if (faceLen === faceCap) {
-            faceCap *= 2;
-            const grown = new Float64Array(faceCap);
-            grown.set(faceKeys);
-            faceKeys = grown;
-        }
-        faceKeys[faceLen++] =
-            (((bucket * coordStride + p) * coordStride + u) * coordStride + v);
-    };
 
     const blockTypeAt = (bx: number, by: number, bz: number): number => {
         if (bx < 0 || by < 0 || bz < 0 || bx >= nbx || by >= nby || bz >= nbz) {
@@ -79,17 +87,6 @@ const voxelFaces = (
         return isVoxelSetLocal(masks.lo[s], masks.hi[s], ix & 3, iy & 3, iz & 3);
     };
 
-    const addVoxelFace = (ix: number, iy: number, iz: number, bucket: number): void => {
-        switch (bucket) {
-            case 0: addFace(0, ix, iy, iz); break;         // -X
-            case 1: addFace(1, ix + 1, iy, iz); break;     // +X
-            case 2: addFace(2, iy, ix, iz); break;         // -Y
-            case 3: addFace(3, iy + 1, ix, iz); break;     // +Y
-            case 4: addFace(4, iz, ix, iy); break;         // -Z
-            default: addFace(5, iz + 1, ix, iy); break;    // +Z
-        }
-    };
-
     const processSolidBlock = (bx: number, by: number, bz: number): void => {
         const x0 = bx << 2;
         const y0 = by << 2;
@@ -102,7 +99,7 @@ const voxelFaces = (
                 for (let ly = 0; ly < 4; ly++) {
                     const iy = y0 + ly;
                     if (neighborBlockType === BLOCK_EMPTY || !isVoxelSetGlobal(nx2, iy, iz)) {
-                        addVoxelFace(ix, iy, iz, bucket);
+                        cb(ix, iy, iz, bucket);
                     }
                 }
             }
@@ -115,7 +112,7 @@ const voxelFaces = (
                 for (let lx = 0; lx < 4; lx++) {
                     const ix = x0 + lx;
                     if (neighborBlockType === BLOCK_EMPTY || !isVoxelSetGlobal(ix, ny2, iz)) {
-                        addVoxelFace(ix, iy, iz, bucket);
+                        cb(ix, iy, iz, bucket);
                     }
                 }
             }
@@ -128,7 +125,7 @@ const voxelFaces = (
                 for (let lx = 0; lx < 4; lx++) {
                     const ix = x0 + lx;
                     if (neighborBlockType === BLOCK_EMPTY || !isVoxelSetGlobal(ix, iy, nz2)) {
-                        addVoxelFace(ix, iy, iz, bucket);
+                        cb(ix, iy, iz, bucket);
                     }
                 }
             }
@@ -157,12 +154,12 @@ const voxelFaces = (
                 for (let lx = 0; lx < 4; lx++) {
                     if (!isVoxelSetLocal(lo, hi, lx, ly, lz)) continue;
                     const ix = x0 + lx;
-                    if (!isVoxelSetGlobal(ix - 1, iy, iz)) addVoxelFace(ix, iy, iz, 0);
-                    if (!isVoxelSetGlobal(ix + 1, iy, iz)) addVoxelFace(ix, iy, iz, 1);
-                    if (!isVoxelSetGlobal(ix, iy - 1, iz)) addVoxelFace(ix, iy, iz, 2);
-                    if (!isVoxelSetGlobal(ix, iy + 1, iz)) addVoxelFace(ix, iy, iz, 3);
-                    if (!isVoxelSetGlobal(ix, iy, iz - 1)) addVoxelFace(ix, iy, iz, 4);
-                    if (!isVoxelSetGlobal(ix, iy, iz + 1)) addVoxelFace(ix, iy, iz, 5);
+                    if (!isVoxelSetGlobal(ix - 1, iy, iz)) cb(ix, iy, iz, 0);
+                    if (!isVoxelSetGlobal(ix + 1, iy, iz)) cb(ix, iy, iz, 1);
+                    if (!isVoxelSetGlobal(ix, iy - 1, iz)) cb(ix, iy, iz, 2);
+                    if (!isVoxelSetGlobal(ix, iy + 1, iz)) cb(ix, iy, iz, 3);
+                    if (!isVoxelSetGlobal(ix, iy, iz - 1)) cb(ix, iy, iz, 4);
+                    if (!isVoxelSetGlobal(ix, iy, iz + 1)) cb(ix, iy, iz, 5);
                 }
             }
         }
@@ -192,6 +189,158 @@ const voxelFaces = (
             }
         }
     }
+};
+
+/**
+ * Emit one 1x1 quad per exposed voxel face, with shared corners welded.
+ *
+ * Because every quad is exactly one voxel across, no edge can contain a
+ * vertex between its endpoints, so this needs none of the merge path's
+ * T-junction repair: no face-key array, no sort, no rectangle list, no
+ * per-grid-line point sets and no ear clipping. Faces are counted first so the
+ * index buffer is allocated once at its final size.
+ *
+ * Each quad's two triangles are emitted consecutively, which lets callers pair
+ * them without building an edge map.
+ *
+ * @param grid - Voxel grid to mesh.
+ * @param gridBounds - Grid bounds aligned to block boundaries.
+ * @param voxelResolution - Size of each voxel in world units.
+ * @returns Mesh with positions and indices.
+ */
+const voxelFacesPerVoxel = (
+    grid: SparseVoxelGrid,
+    gridBounds: Bounds,
+    voxelResolution: number
+): Mesh => {
+    let faceCount = 0;
+    forEachExposedFace(grid, () => {
+        faceCount++;
+    });
+
+    if (faceCount === 0) {
+        return { positions: new Float32Array(0), indices: new Uint32Array(0) };
+    }
+
+    const indices = new Uint32Array(faceCount * 6);
+    let idxLen = 0;
+
+    // Euler's formula gives V = F + 2 for a closed quad surface, so the vertex
+    // count is known up front to within the slack that non-manifold contacts
+    // (voxels meeting only along an edge or corner) add.
+    const vertexGuess = faceCount + (faceCount >> 3) + 64;
+    let posCap = Math.min(faceCount * 4, vertexGuess) * 3;
+    let positions = new Float32Array(posCap);
+    let posLen = 0;
+
+    const { nx, ny, nz } = grid;
+    const coordStride = Math.max(nx, ny, nz) + 1;
+    const coordStride2 = coordStride * coordStride;
+    const vertexMap = new IntKeyMap(Math.ceil(vertexGuess / 0.7));
+
+    const minX = gridBounds.min.x;
+    const minY = gridBounds.min.y;
+    const minZ = gridBounds.min.z;
+
+    const getVertex = (x: number, y: number, z: number): number => {
+        const key = x + y * coordStride + z * coordStride2;
+        const slot = vertexMap.slot(key);
+        if (vertexMap.keys[slot] !== -1) return vertexMap.values[slot];
+
+        if (posLen + 3 > posCap) {
+            posCap *= 2;
+            const grown = new Float32Array(posCap);
+            grown.set(positions);
+            positions = grown;
+        }
+        const idx = posLen / 3;
+        positions[posLen++] = minX + x * voxelResolution;
+        positions[posLen++] = minY + y * voxelResolution;
+        positions[posLen++] = minZ + z * voxelResolution;
+        vertexMap.insertAt(slot, key, idx);
+        return idx;
+    };
+
+    const corner = new Int32Array(4);
+
+    forEachExposedFace(grid, (ix, iy, iz, bucket) => {
+        const offsets = QUAD_CORNERS[bucket];
+        for (let k = 0; k < 4; k++) {
+            corner[k] = getVertex(
+                ix + offsets[k * 3],
+                iy + offsets[k * 3 + 1],
+                iz + offsets[k * 3 + 2]
+            );
+        }
+        const order = QUAD_LOCAL_CCW[bucket] ? QUAD_TRIS_CCW : QUAD_TRIS_CW;
+        for (let k = 0; k < 6; k++) {
+            indices[idxLen++] = corner[order[k]];
+        }
+    });
+
+    vertexMap.releaseStorage();
+
+    return {
+        positions: posLen === positions.length ? positions : positions.slice(0, posLen),
+        indices
+    };
+};
+
+/**
+ * Extract a watertight voxel-boundary mesh from a SparseVoxelGrid.
+ *
+ * By default exposed voxel faces are first greedily merged into larger
+ * axis-aligned rectangles before triangulation, reducing triangle count.
+ * When `opts.perVoxel` is true each visible voxel face stays its own
+ * 1×1 quad — no merging — and the two triangles of each quad are emitted
+ * consecutively.
+ *
+ * @param grid - Voxel grid after filtering / nav phases.
+ * @param gridBounds - Grid bounds aligned to block boundaries.
+ * @param voxelResolution - Size of each voxel in world units.
+ * @param opts - Optional flags.
+ * @param opts.perVoxel - Emit one 1×1 quad per visible voxel face instead
+ * of greedily merging coplanar neighbours. Defaults to false.
+ * @returns Mesh with positions and indices.
+ */
+const voxelFaces = (
+    grid: SparseVoxelGrid,
+    gridBounds: Bounds,
+    voxelResolution: number,
+    opts?: { perVoxel?: boolean }
+): Mesh => {
+    if (opts?.perVoxel === true) {
+        return voxelFacesPerVoxel(grid, gridBounds, voxelResolution);
+    }
+
+    const { nx, ny, nz } = grid;
+    const coordStride = Math.max(nx, ny, nz) + 1;
+
+    let faceCap = 1024;
+    let faceLen = 0;
+    let faceKeys = new Float64Array(faceCap);
+
+    const addFace = (bucket: number, p: number, u: number, v: number): void => {
+        if (faceLen === faceCap) {
+            faceCap *= 2;
+            const grown = new Float64Array(faceCap);
+            grown.set(faceKeys);
+            faceKeys = grown;
+        }
+        faceKeys[faceLen++] =
+            (((bucket * coordStride + p) * coordStride + u) * coordStride + v);
+    };
+
+    forEachExposedFace(grid, (ix, iy, iz, bucket) => {
+        switch (bucket) {
+            case 0: addFace(0, ix, iy, iz); break;         // -X
+            case 1: addFace(1, ix + 1, iy, iz); break;     // +X
+            case 2: addFace(2, iy, ix, iz); break;         // -Y
+            case 3: addFace(3, iy + 1, ix, iz); break;     // +Y
+            case 4: addFace(4, iz, ix, iy); break;         // -Z
+            default: addFace(5, iz + 1, ix, iy); break;    // +Z
+        }
+    });
 
     if (faceLen === 0) {
         return { positions: new Float32Array(0), indices: new Uint32Array(0) };
@@ -234,118 +383,103 @@ const voxelFaces = (
     faceKeys = new Float64Array(0);
     keys.sort();
 
-    if (perVoxel) {
-        // emit one 1×1 quad- rectangle per visible voxel face — no merging
-        for (let k = 0; k < keys.length; k++) {
-            const key = keys[k];
-            // key = ((bucket * coordStride + p) * coordStride + u) * coordStride + v
-            const q = Math.floor(key / coordStride);
-            const v = Math.floor(key - q * coordStride); // key % coordStride
-            const q2 = Math.floor(q / coordStride);
-            const u = Math.floor(q - q2 * coordStride); // q % coordStride
-            const bucket = Math.floor(q2 / coordStride);
-            const p = Math.floor(q2 - bucket * coordStride); // q2 % coordStride
-            addRect(bucket, p, u, v, u + 1, v + 1);
-        }
-    } else {
-        // greedy-merge adjacent faces into larger rectangles
+    // greedy-merge adjacent faces into larger rectangles
 
-        const decodeGroup = (key: number): { bucket: number; p: number } => {
-            let q = Math.floor(key / coordStride);
-            q = Math.floor(q / coordStride);
-            const p = q % coordStride;
-            const bucket = Math.floor(q / coordStride);
-            return { bucket, p };
+    const decodeGroup = (key: number): { bucket: number; p: number } => {
+        let q = Math.floor(key / coordStride);
+        q = Math.floor(q / coordStride);
+        const p = q % coordStride;
+        const bucket = Math.floor(q / coordStride);
+        return { bucket, p };
+    };
+
+    const decodeUvKey = (key: number): number => {
+        const v = key % coordStride;
+        const q = Math.floor(key / coordStride);
+        const u = q % coordStride;
+        return u * coordStride + v;
+    };
+
+    let groupStart = 0;
+    while (groupStart < keys.length) {
+        const { bucket, p } = decodeGroup(keys[groupStart]);
+        let groupEnd = groupStart + 1;
+        while (groupEnd < keys.length) {
+            const g = decodeGroup(keys[groupEnd]);
+            if (g.bucket !== bucket || g.p !== p) break;
+            groupEnd++;
+        }
+
+        const count = groupEnd - groupStart;
+        let hCap = 1;
+        while (hCap < count / 0.7) hCap *= 2;
+        const hMask = hCap - 1;
+        const hKeys = new Float64Array(hCap).fill(-1);
+        const hVals = new Int32Array(hCap);
+
+        const hash = (key: number): number => {
+            const hi = (key / 0x100000000) | 0;
+            return (Math.imul((key | 0) ^ hi, HASH_MUL) >>> 0) & hMask;
         };
 
-        const decodeUvKey = (key: number): number => {
-            const v = key % coordStride;
-            const q = Math.floor(key / coordStride);
-            const u = q % coordStride;
-            return u * coordStride + v;
+        for (let i = 0; i < count; i++) {
+            const uvKey = decodeUvKey(keys[groupStart + i]);
+            let h = hash(uvKey);
+            while (hKeys[h] !== -1) h = (h + 1) & hMask;
+            hKeys[h] = uvKey;
+            hVals[h] = i;
+        }
+
+        const lookup = (uvKey: number): number => {
+            let h = hash(uvKey);
+            while (true) {
+                const k = hKeys[h];
+                if (k === uvKey) return hVals[h];
+                if (k === -1) return -1;
+                h = (h + 1) & hMask;
+            }
         };
 
-        let groupStart = 0;
-        while (groupStart < keys.length) {
-            const { bucket, p } = decodeGroup(keys[groupStart]);
-            let groupEnd = groupStart + 1;
-            while (groupEnd < keys.length) {
-                const g = decodeGroup(keys[groupEnd]);
-                if (g.bucket !== bucket || g.p !== p) break;
-                groupEnd++;
+        const visited = new Uint8Array(count);
+        const uvKeyOf = (u: number, v: number): number => u * coordStride + v;
+
+        for (let i = 0; i < count; i++) {
+            if (visited[i]) continue;
+            const uvKey = decodeUvKey(keys[groupStart + i]);
+            const u0 = Math.floor(uvKey / coordStride);
+            const v0 = uvKey % coordStride;
+
+            let width = 1;
+            while (true) {
+                const idx = lookup(uvKeyOf(u0 + width, v0));
+                if (idx === -1 || visited[idx]) break;
+                width++;
             }
 
-            const count = groupEnd - groupStart;
-            let hCap = 1;
-            while (hCap < count / 0.7) hCap *= 2;
-            const hMask = hCap - 1;
-            const hKeys = new Float64Array(hCap).fill(-1);
-            const hVals = new Int32Array(hCap);
-
-            const hash = (key: number): number => {
-                const hi = (key / 0x100000000) | 0;
-                return (Math.imul((key | 0) ^ hi, HASH_MUL) >>> 0) & hMask;
-            };
-
-            for (let i = 0; i < count; i++) {
-                const uvKey = decodeUvKey(keys[groupStart + i]);
-                let h = hash(uvKey);
-                while (hKeys[h] !== -1) h = (h + 1) & hMask;
-                hKeys[h] = uvKey;
-                hVals[h] = i;
-            }
-
-            const lookup = (uvKey: number): number => {
-                let h = hash(uvKey);
-                while (true) {
-                    const k = hKeys[h];
-                    if (k === uvKey) return hVals[h];
-                    if (k === -1) return -1;
-                    h = (h + 1) & hMask;
-                }
-            };
-
-            const visited = new Uint8Array(count);
-            const uvKeyOf = (u: number, v: number): number => u * coordStride + v;
-
-            for (let i = 0; i < count; i++) {
-                if (visited[i]) continue;
-                const uvKey = decodeUvKey(keys[groupStart + i]);
-                const u0 = Math.floor(uvKey / coordStride);
-                const v0 = uvKey % coordStride;
-
-                let width = 1;
-                while (true) {
-                    const idx = lookup(uvKeyOf(u0 + width, v0));
-                    if (idx === -1 || visited[idx]) break;
-                    width++;
-                }
-
-                let height = 1;
-                while (true) {
-                    let canGrow = true;
-                    for (let du = 0; du < width; du++) {
-                        const idx = lookup(uvKeyOf(u0 + du, v0 + height));
-                        if (idx === -1 || visited[idx]) {
-                            canGrow = false;
-                            break;
-                        }
-                    }
-                    if (!canGrow) break;
-                    height++;
-                }
-
-                for (let dv = 0; dv < height; dv++) {
-                    for (let du = 0; du < width; du++) {
-                        visited[lookup(uvKeyOf(u0 + du, v0 + dv))] = 1;
+            let height = 1;
+            while (true) {
+                let canGrow = true;
+                for (let du = 0; du < width; du++) {
+                    const idx = lookup(uvKeyOf(u0 + du, v0 + height));
+                    if (idx === -1 || visited[idx]) {
+                        canGrow = false;
+                        break;
                     }
                 }
-
-                addRect(bucket, p, u0, v0, u0 + width, v0 + height);
+                if (!canGrow) break;
+                height++;
             }
 
-            groupStart = groupEnd;
+            for (let dv = 0; dv < height; dv++) {
+                for (let du = 0; du < width; du++) {
+                    visited[lookup(uvKeyOf(u0 + du, v0 + dv))] = 1;
+                }
+            }
+
+            addRect(bucket, p, u0, v0, u0 + width, v0 + height);
         }
+
+        groupStart = groupEnd;
     }
 
     const globalPoint = (
@@ -425,7 +559,7 @@ const voxelFaces = (
     let idxCap = 1024;
     let idxLen = 0;
     let indices = new Uint32Array(idxCap);
-    const vertexMap = new Map<number, number>();
+    const vertexMap = new IntKeyMap();
     let perimeterScratch = new Uint32Array(16);
     let perimeterU = new Int32Array(16);
     let perimeterV = new Int32Array(16);
@@ -453,10 +587,10 @@ const voxelFaces = (
 
     const getVertex = (x: number, y: number, z: number): number => {
         const key = vertexKey(x, y, z);
-        const existing = vertexMap.get(key);
-        if (existing !== undefined) return existing;
+        const slot = vertexMap.slot(key);
+        if (vertexMap.keys[slot] !== -1) return vertexMap.values[slot];
         const idx = addPosition(x, y, z);
-        vertexMap.set(key, idx);
+        vertexMap.insertAt(slot, key, idx);
         return idx;
     };
 
@@ -673,4 +807,4 @@ const voxelFaces = (
     };
 };
 
-export { voxelFaces };
+export { voxelFaces, forEachExposedFace };
