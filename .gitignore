@@ -5,3 +5,4 @@ docs
 scenes/
 .cursor/
 tools/.color-noise-out/
+.worktrees
