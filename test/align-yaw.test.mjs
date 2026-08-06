@@ -151,6 +151,10 @@ describe('estimateAlignYaw', function () {
 
         const result = estimateAlignYaw(merged);
 
+        // The opacity cutoff must actually exclude the 200 faint splats -
+        // otherwise this passes for the wrong reason (weights nearly
+        // cancelling instead of the faint set being filtered out).
+        assert.strictEqual(result.votedCount, 4);
         assert.ok(Math.abs(result.yawDegrees) < 1,
             `expected the opaque on-axis walls to win, got ${result.yawDegrees}`);
     });
