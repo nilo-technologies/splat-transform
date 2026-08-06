@@ -164,12 +164,14 @@ describe('estimateAlignYaw', function () {
         const result = estimateAlignYaw(table);
 
         assert.strictEqual(result.reason, undefined, `unexpected guard: ${result.reason}`);
-        assert.ok(result.improvement > 0.2, `expected a large improvement, got ${result.improvement}`);
+        // Ceiling for this exact fixture is 1 - 1/(cos17+sin17) ~= 0.19915; leave margin below it.
+        assert.ok(result.improvement > 0.19, `expected a large improvement, got ${result.improvement}`);
         for (let row = 0; row < 4; row++) {
             assert.ok(alignmentRatio(table, row, 0) > 1.2,
                 `row ${row}: fixture should start misaligned`);
             const after = alignmentRatio(table, row, result.yawDegrees);
-            assert.ok(after < 1.001,
+            // Worst case at the default stepDegrees is ~1.00109 (0.0625deg bin residual); 1.0015 covers it with margin.
+            assert.ok(after < 1.0015,
                 `row ${row}: expected axis-aligned after yaw, ratio ${after}`);
         }
     });
@@ -183,7 +185,8 @@ describe('estimateAlignYaw', function () {
             `expected a normalized yaw, got ${result.yawDegrees}`);
         for (let row = 0; row < 4; row++) {
             const after = alignmentRatio(table, row, result.yawDegrees);
-            assert.ok(after < 1.001,
+            // Worst case at the default stepDegrees is ~1.00109 (0.0625deg bin residual); 1.0015 covers it with margin.
+            assert.ok(after < 1.0015,
                 `row ${row}: expected axis-aligned after yaw, ratio ${after}`);
         }
     });
@@ -539,7 +542,8 @@ Append inside `describe('estimateAlignYaw', ...)` in `test/align-yaw.test.mjs`:
 
         assert.strictEqual(result.votedCount, 3);
         assert.ok(Number.isFinite(result.costBest));
-        assert.ok(result.improvement > 0.2);
+        // Ceiling for this fixture is ~0.19915 (see Task 1); leave margin below it.
+        assert.ok(result.improvement > 0.19);
     });
 ```
 
@@ -604,8 +608,9 @@ Add `import { Transform } from '../src/lib/utils/index.js';` to the imports, the
         const aboutZ = estimateAlignYaw(table, { up: 'z' });
 
         // These normals lie in the XZ plane, so a Y-up search sees them fully
-        // while a Z-up search sees them partly edge-on.
-        assert.ok(aboutY.improvement > 0.2);
+        // while a Z-up search sees them partly edge-on. Ceiling for this
+        // fixture is ~0.19915 (see Task 1); leave margin below it.
+        assert.ok(aboutY.improvement > 0.19);
         assert.ok(aboutZ.improvement <= aboutY.improvement + 1e-9);
     });
 
