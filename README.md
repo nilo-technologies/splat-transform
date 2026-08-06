@@ -134,6 +134,10 @@ Actions execute in the order specified and can be repeated. Any action may appea
     --mem                               Show memory usage in progress output
     --tty                               Interactive bar rendering (default on a TTY; --no-tty to disable)
 -w, --overwrite                         Overwrite output file if it exists
+    --max-workers      <n>              Worker threads for CPU-heavy stages such as SOG encoding.
+                                          0 runs everything inline on the calling thread. Peak memory
+                                          scales with worker count, since each worker holds its own
+                                          WebP WASM heap. Default: min(4, cores - 1)
 ```
 
 ## GPU Options
@@ -250,9 +254,12 @@ Apply when writing `.voxel.json` (sparse voxel octree for collision detection). 
     --collision-voxels  <file.vox>      Also write the collision voxels as a MagicaVoxel .vox model, coloured
                                           per voxel straight from the splats. Needs no collision mesh.
                                           Default: off
-    --collision-voxels-size    <size>   Voxel size for the .vox model only, so it can fit the format's
-                                          256-per-axis limit while the octree and collision mesh keep the finer
-                                          --voxel-params size. Rounded to a whole multiple of it.
+    --collision-voxels-size    <size>   Voxel size for the .vox model only, leaving the octree and collision
+                                          mesh at the finer --voxel-params size. A region wider than 256 voxels
+                                          per axis is tiled into several models automatically, so this is for
+                                          keeping the model count and file size sensible rather than for
+                                          fitting the axis limit. Must be >= --voxel-params size and is
+                                          rounded to a whole multiple of it.
                                           Default: same as --voxel-params size
 ```
 
@@ -264,16 +271,27 @@ The filter is edge-preserving, so this costs very little detail: a vertex only a
 
 `--collision-voxels` writes the collision voxels as a MagicaVoxel model. Colours are sampled once per voxel, at its centre and using the average of its exposed face normals, then run through the same denoise and palette steps as the mesh — so every colour option above applies, and the `.vox` opens looking like the `.glb`. Sampling per voxel rather than per mesh vertex is both the natural granularity for the format (a MagicaVoxel voxel carries one colour) and far cheaper: on a 48 m landscape at 2 cm it is ~186K samples instead of ~18M, seconds instead of minutes. It also means the `.vox` needs no collision mesh at all — `--collision-voxels` works on its own.
 
-Two format limits apply. A model holds at most 255 colours, so a larger palette, or none, is reduced to 255 for the `.vox` only. And `XYZI` stores each coordinate in a single byte, so **a model spans at most 256 voxels per axis** — at 2 cm voxels that is a 5.12 m cube. This is checked immediately after the grid is cropped, before any colouring or mesh work, and the error names the smallest voxel size that would fit:
+Only voxels with at least one exposed face are sampled. A voxel enclosed on all six sides cannot be seen, so a BVH query for it buys nothing — and on a solid volume those are the large majority: a 200x180x204 house at 5 mm holds 3.07M occupied voxels of which only 292K (9.5%) are on the surface. Enclosed voxels then take the colour of the nearest surface voxel by breadth-first flood, which costs no BVH work and keeps the interior sensible if the model is later sliced open. Because the flood copies already-palettised colours it adds no palette entries, and because the palette is chosen from the surface alone it is not skewed by invisible voxels.
+
+`XYZI` stores each coordinate in a single byte, so **one model spans at most 256 voxels per axis** — at 2 cm voxels a 5.12 m cube. A larger region is split into tiled models placed by the `nTRN`/`nGRP`/`nSHP` scene graph, so this is handled rather than rejected. Tiles are aligned to the occupied region, sized tightly around their own contents, and only non-empty tiles become models. A model also holds at most 255 colours, so a larger palette, or none, is reduced to 255 for the `.vox` only.
+
+The one hard limit left is model count, capped at 256. That is a practical ceiling rather than a format one — the format only bounds node ids to int32 — but MagicaVoxel is not usable with thousands of objects. It is checked immediately after the grid is cropped, before any colouring, and the error names the smallest voxel size that fits:
 
 ```
-The .vox model would be 2332x809x2411 voxels, which exceeds the MagicaVoxel limit of
-256 per axis. The occupied region spans 46.6x16.2x48.2 world units, so the .vox needs
-a voxel size of at least 0.2. Pass --collision-voxels-size 0.2 to coarsen only the
-.vox and keep the collision grid, or raise --voxel-params to coarsen everything.
+The .vox model would be 9608x2726x1972 voxels, which needs more than 256 models of
+256x256x256 to represent. The occupied region spans 48.0x13.6x9.9 world units, so
+the .vox needs a voxel size of at least 0.01. Pass --collision-voxels-size 0.01 to
+coarsen only the .vox and keep the collision grid, or raise --voxel-params to
+coarsen everything.
 ```
 
-The suggested size is a whole multiple of the collision voxel size and is checked to fit, so it works first time.
+The suggested size is a whole multiple of the collision voxel size and is verified to fit, so it works first time. Tiling makes it easy to ask for a model far larger than is useful, so a warning fires past 8M voxels:
+
+```
+! the .vox holds 152M voxels (578.4MB); MagicaVoxel is unlikely to open it usefully.
+  Pass a larger --collision-voxels-size to coarsen the model without touching the
+  collision grid.
+```
 
 `--collision-voxels-size` is the usual answer: it decouples the `.vox` from the collision resolution, reducing the grid for the model only (a coarse voxel is solid when any fine voxel inside it is), so the octree and `.collision.glb` keep their detail.
 
@@ -615,9 +633,15 @@ import {
 | `computeSummary` | Generate statistical summary of data |
 | `sortMortonOrder` | Sort indices by Morton code for spatial locality |
 | `sortByVisibility` | Sort indices by visibility score for filtering |
-| `writeVoxel` | Write sparse voxel octree files |
+| `writeVoxel` | Write sparse voxel octree files, plus the optional `.collision.glb` and `.vox` |
 | `writeImage` | Render a camera view to a lossless WebP image (requires GPU) |
 | `renderSplats` | Lower-level renderer returning the raw RGBA byte buffer |
+| `SparseVoxelGrid` | The voxel grid every collision/voxel path operates on |
+| `buildCollisionVox` | Encode a grid as a MagicaVoxel `.vox`, colours sampled from the splats |
+| `buildCollisionMesh` | Extract a collision mesh from a grid and encode it as GLB |
+| `buildSparseOctree` | Build the sparse voxel octree `writeVoxel` serialises |
+| `voxelFaces`, `marchingCubes` | Mesh extraction from a grid |
+| `GaussianBVH`, `computeGaussianExtents` | Build the colour source the above need |
 
 ### File System Abstractions
 
@@ -705,6 +729,85 @@ type ProcessAction =
 
 > [!NOTE]
 > `filterFloaters` and `filterCluster` require a GPU device — pass `createDevice` via the `ProcessOptions` argument to `processDataTable`.
+
+### Voxel and Collision Generation
+
+`writeVoxel` composes the voxel pipeline and writes files. Every stage it uses is
+also exported, so a consumer can drive the same paths directly — in the browser
+included — and keep the bytes in memory instead of writing them.
+
+Colouring needs a `GaussianBVH` over the splats plus their colour columns:
+
+```javascript
+import {
+    buildCollisionVox, buildCollisionMesh, computeGaussianExtents,
+    GaussianBVH, SparseVoxelGrid
+} from '@playcanvas/splat-transform';
+import { Vec3 } from 'playcanvas';
+
+// a grid can come from the voxelizer, or be filled directly
+const grid = new SparseVoxelGrid(16, 16, 16);
+for (let z = 0; z < 16; z++)
+    for (let y = 0; y < 16; y++)
+        for (let x = 0; x < 16; x++) grid.setVoxel(x, y, z);
+
+const voxelResolution = 0.5;
+const gridBounds = { min: new Vec3(0, 0, 0), max: new Vec3(8, 8, 8) };
+
+const { extents } = computeGaussianExtents(splats, 0.1);
+const colorSource = {
+    bvh: new GaussianBVH(splats, extents),
+    columns: {
+        f_dc_0: splats.getColumnByName('f_dc_0').data,
+        f_dc_1: splats.getColumnByName('f_dc_1').data,
+        f_dc_2: splats.getColumnByName('f_dc_2').data,
+        opacity: splats.getColumnByName('opacity').data
+    },
+    mode: 'solid',      // or 'average'
+    palette: 64         // optional; also smoothRadius / coherentRadius
+};
+
+// MagicaVoxel model, as raw bytes
+const vox = buildCollisionVox(grid, gridBounds, voxelResolution, colorSource);
+
+// collision mesh, as GLB bytes
+const glb = buildCollisionMesh(grid, gridBounds, voxelResolution, 'voxel', {
+    ...colorSource,
+    flatShade: true
+});
+```
+
+The `.vox` limits can be inspected before committing to any colouring work, which
+is the cheap part of the pipeline:
+
+```javascript
+import {
+    assertVoxFits, countVoxModels, downsampleGrid,
+    enumerateOccupied, minVoxFactorForModels, MAX_VOX_MODELS
+} from '@playcanvas/splat-transform';
+
+const occupied = enumerateOccupied(grid);          // count + tight bounds
+countVoxModels(occupied, 1);                        // models needed at full detail
+minVoxFactorForModels(occupied);                    // smallest reduction that fits
+assertVoxFits(occupied, voxelResolution, 1);        // throws with an actionable message
+
+// reduce for the model only, leaving `grid` untouched
+const plan = downsampleGrid(grid, gridBounds, voxelResolution, 4);
+const smaller = buildCollisionVox(plan.grid, plan.gridBounds, plan.voxelResolution, colorSource);
+```
+
+`forEachExposedFace` and `SparseVoxelGrid.forEachOccupiedVoxel` iterate the sparse
+block structure directly, so custom meshing or analysis costs time proportional to
+occupancy rather than to grid volume:
+
+```javascript
+import { forEachExposedFace } from '@playcanvas/splat-transform';
+
+let faces = 0;
+forEachExposedFace(grid, (x, y, z, bucket) => faces++);  // bucket: 0..5 = -X,+X,-Y,+Y,-Z,+Z
+
+grid.forEachOccupiedVoxel((x, y, z) => { /* ... */ });
+```
 
 ### Custom Logging
 

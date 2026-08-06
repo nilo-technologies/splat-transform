@@ -1,4 +1,8 @@
 export { filterAndFillBlocks } from './block-cleanup';
+export { BlockMaskBuffer } from './block-mask-buffer';
+export {
+    BLOCK_EMPTY, BLOCK_MIXED, BLOCK_SOLID, SparseVoxelGrid, readBlockType, writeBlockType
+} from './sparse-voxel-grid';
 export { voxelizeToBuffer, alignGridBounds } from './voxelize';
 export { filterCluster, findClusterVoxelFlood } from './filter-cluster';
 export { filterFloaters } from './filter-floaters';

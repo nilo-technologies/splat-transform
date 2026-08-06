@@ -1,6 +1,7 @@
 // Data table
 export { Column, DataTable, combine, convertToSpace, computeSummary, sortMortonOrder, sortByVisibility, simplifyGaussians, getSHBands } from './data-table';
-export type { TypedArray, ColumnType, Row, ColumnStats, SummaryData } from './data-table';
+export { computeGaussianExtents } from './data-table';
+export type { TypedArray, ColumnType, Row, ColumnStats, SummaryData, Bounds, GaussianExtentsResult } from './data-table';
 
 // Utils
 export {
@@ -53,12 +54,47 @@ export { readKsplat, readLcc, readLcc2, readMjs, readPly, readSog, readSplat, re
 export { writeSog, writeSpz, writePly, writeCompressedPly, writeCsv, writeHtml, writeImage, writeLod, writeGlb, writeVoxel } from './writers';
 export type { WriteImageOptions, WriteVoxelOptions, VoxelMetadata } from './writers';
 
+// Collision / voxel-model generation from a voxel grid (for advanced use).
+// These are the pieces `writeVoxel` composes, exposed so a caller can drive the
+// same paths directly without going through file output.
+export {
+    assertVoxFits,
+    buildCollisionMesh,
+    buildCollisionVox,
+    countVoxModels,
+    downsampleGrid,
+    enumerateOccupied,
+    minVoxFactorForModels,
+    buildSparseOctree,
+    MAX_VOX_DIM,
+    MAX_VOX_MODELS,
+    SOLID_LEAF_MARKER
+} from './writers';
+export type { VoxColorSource, VoxelSet, SparseOctree } from './writers';
+
+// Mesh extraction and vertex colouring (for advanced use)
+export {
+    marchingCubes, coplanarMerge, voxelFaces, forEachExposedFace,
+    computeVertexNormals, colorizeVertices,
+    palettizeColors, mapToPalette, parsePaletteColors,
+    smoothVertexColors, majorityFilterIndices, MAX_COLOR_RADIUS
+} from './mesh';
+export type { Mesh, MarchingCubesMesh, MarchingCubesOptions, SplatColorColumns, PalettizeOptions } from './mesh';
+
+// Spatial acceleration (for advanced use)
+export { GaussianBVH, KdTree, BTree, kmeans, quantize1d } from './spatial';
+export type { GaussianBVHNode, BVHBounds, KdTreeNode, BTreeNode } from './spatial';
+
 // Renderer (for advanced use)
 export { renderSplats, buildCameraBasis } from './render';
 export type { Projection, RenderCamera, CameraBasis } from './render';
 
 // Voxel
-export { carve, fillExterior, fillFloor, filterCluster, filterFloaters, findClusterVoxelFlood, voxelizeToBuffer } from './voxel';
+export {
+    alignGridBounds, carve, fillExterior, fillFloor, filterAndFillBlocks, filterCluster,
+    filterFloaters, findClusterVoxelFlood, voxelizeToBuffer,
+    BlockMaskBuffer, SparseVoxelGrid, BLOCK_EMPTY, BLOCK_MIXED, BLOCK_SOLID
+} from './voxel';
 export type { NavSeed, NavSimplifyResult } from './voxel';
 
 // Types
