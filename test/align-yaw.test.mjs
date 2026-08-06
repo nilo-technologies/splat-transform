@@ -113,4 +113,59 @@ describe('estimateAlignYaw', function () {
                 `row ${row}: expected axis-aligned after yaw, ratio ${after}`);
         }
     });
+
+    it('ignores isotropic blobs, which have no surface orientation', function () {
+        const table = makeWalls([17, 107, 197, 287], { thin: 0.5, wide: 0.5 });
+
+        const result = estimateAlignYaw(table);
+
+        assert.strictEqual(result.yawDegrees, 0);
+        assert.strictEqual(result.votedCount, 0);
+        assert.match(result.reason, /no eligible gaussians/);
+    });
+
+    it('reports no dominant alignment when normals are spread evenly', function () {
+        const yaws = [];
+        for (let i = 0; i < 360; i++) yaws.push(i * 0.25);
+
+        const result = estimateAlignYaw(makeWalls(yaws));
+
+        assert.strictEqual(result.yawDegrees, 0);
+        assert.ok(result.votedCount > 0, 'the splats should still have voted');
+        assert.match(result.reason, /no dominant alignment/);
+    });
+
+    it('does not let faint gaussians outvote opaque ones', function () {
+        // 200 faint walls at 30 degrees against 4 opaque walls on-axis. The
+        // faint set is under the cutoff, so the opaque set must decide.
+        const faint = makeWalls(new Array(200).fill(30), { alpha: 0.02 });
+        const opaque = makeWalls([0, 90, 180, 270], { alpha: 0.95 });
+        const merged = new DataTable(COLUMN_NAMES.map((name) => {
+            const head = faint.getColumnByName(name).data;
+            const tail = opaque.getColumnByName(name).data;
+            const data = new Float32Array(head.length + tail.length);
+            data.set(head, 0);
+            data.set(tail, head.length);
+            return new Column(name, data);
+        }));
+
+        const result = estimateAlignYaw(merged);
+
+        assert.ok(Math.abs(result.yawDegrees) < 1,
+            `expected the opaque on-axis walls to win, got ${result.yawDegrees}`);
+    });
+
+    it('counts fully opaque splats and skips NaN rows', function () {
+        const table = makeWalls([17, 107, 197, 287]);
+        const opacityData = table.getColumnByName('opacity').data;
+        opacityData[0] = Infinity;   // alpha === 1, votes
+        opacityData[1] = NaN;        // skipped
+
+        const result = estimateAlignYaw(table);
+
+        assert.strictEqual(result.votedCount, 3);
+        assert.ok(Number.isFinite(result.costBest));
+        // Ceiling for this fixture is ~0.19915 (see Task 1); leave margin below it.
+        assert.ok(result.improvement > 0.19);
+    });
 });
