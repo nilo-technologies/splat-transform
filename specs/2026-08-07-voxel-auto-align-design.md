@@ -140,15 +140,28 @@ transform, which is why raw scale columns can be read directly.
 
 ### Cost function
 
-Stated for `up: 'y'`; for another axis substitute its component pair from the
-options section below. With `h = hypot(n_x, n_z)`, `phi = atan2(n_z, n_x)` and
-`g(a) = |cos a| + |sin a|`:
+The horizontal component pair is taken in right-handed cyclic order for the
+chosen up axis, which makes the rotation sign uniform across all three:
+
+| `up` | pair `(a, b)` |
+| --- | --- |
+| `'x'` | `(y, z)` |
+| `'y'` | `(z, x)` |
+| `'z'` | `(x, y)` |
+
+With `h = hypot(a, b)`, `phi = atan2(b, a)` and `g(a) = |cos a| + |sin a|`:
 
 ```
 cost(theta) = sum over gaussians of  w * h * g(phi + theta)
 ```
 
-`|n_y|` is invariant under yaw and is dropped. `g` has period 90 degrees, minima
+The component along the up axis is invariant under the rotation and is dropped.
+
+Verified empirically rather than derived on paper, because the sign is easy to
+invert: `new Quat().setFromEulerAngles(0, 30, 0)` maps `(1,0,0)` to
+`(0.866, 0, -0.5)`, i.e. `atan2(z, x)` by `-30` degrees but the cyclic pair
+`(z, x)` by `+30`. Using the naive pair `(x, z)` for `up: 'y'` would yield a yaw
+of the wrong sign, doubling the misalignment instead of removing it. `g` has period 90 degrees, minima
 at multiples of 90 and maximum `sqrt(2)` at 45, so the ceiling on improvement is
 `1 - 1/sqrt(2)`, about 29% fewer surface voxels.
 
@@ -156,10 +169,13 @@ at multiples of 90 and maximum `sqrt(2)` at 45, so the ceiling on improvement is
 
 1. One O(N) pass accumulates `W[bin] += w * h` into 720 bins of `phi mod 90deg`
    (0.125 degree resolution).
-2. `cost(theta) = sum over bins of W[bin] * g(bin_centre + theta)` evaluated over
-   `[0, 90)` at the same step: 720 x 720 multiply-adds, sub-millisecond and
-   independent of splat count.
-3. Parabolic fit around the argmin for sub-bin precision.
+2. Precompute `G[m] = g((m + 0.5) * 90deg / bins)`. Because both `phi` and
+   `theta` land on bin multiples, the cost sweep is a cyclic correlation with no
+   trigonometry in the inner loop:
+   `curve[j] = sum over bins of W[b] * G[(b + j) mod bins]`.
+   720 x 720 multiply-adds, sub-millisecond and independent of splat count.
+3. Parabolic fit across the argmin and its two cyclic neighbours for sub-bin
+   precision.
 4. Normalize into `[-45, 45]` degrees, the smallest equivalent rotation.
 
 ### Guard
