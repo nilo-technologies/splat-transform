@@ -1382,12 +1382,17 @@ In `src/cli/index.ts`:
 
 4. Add `autoRotate,` to the returned options object beside `collisionVoxelsSize` (:607).
 
-5. Warn when it cannot apply. `outputFormat` is only known in `main`, so put this immediately after the assignment at :1136:
+5. Warn when it cannot apply. `outputFormat` defaults to `null` and is only
+   reassigned inside `if (!isNullOutput) { ... }` (:1135-1165), so a warning
+   placed *inside* that block would never fire for `null` output — silently
+   wrong, since `--auto-rotate` has no effect there either. Put the check
+   right after that `if` block closes, at :1165, so it sees the final value
+   of `outputFormat` in both cases:
 
 ```ts
-        if (options.autoRotate !== false && outputFormat !== 'voxel') {
-            logger.warn('--auto-rotate has no effect without a .voxel.json output.');
-        }
+    if (options.autoRotate !== false && outputFormat !== 'voxel') {
+        logger.warn('--auto-rotate has no effect without a .voxel.json output.');
+    }
 ```
 
 6. Add to the usage text beside `--collision-voxels-size` (:910), matching its column alignment exactly:
