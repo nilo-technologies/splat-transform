@@ -5,13 +5,14 @@ import { Vec3 } from 'playcanvas';
 
 import { Column, DataTable } from '../src/lib/index.js';
 import { GaussianBVH } from '../src/lib/spatial/index.js';
+import { logger } from '../src/lib/utils/index.js';
 import { BlockMaskBuffer } from '../src/lib/voxel/block-mask-buffer.js';
 import { SparseVoxelGrid } from '../src/lib/voxel/sparse-voxel-grid.js';
 import { marchingCubes } from '../src/lib/mesh/marching-cubes.js';
 import { coplanarMerge } from '../src/lib/mesh/coplanar-merge.js';
 import { voxelFaces } from '../src/lib/mesh/voxel-faces.js';
 import { buildCollisionMesh } from '../src/lib/writers/collision-glb.js';
-import { assertVoxFits, buildCollisionVox, downsampleGrid, enumerateOccupied, minVoxFactor, minVoxelSizeForVox, voxFitsAt } from '../src/lib/writers/collision-vox.js';
+import { assertVoxFits, buildCollisionVox, countVoxModels, downsampleGrid, enumerateOccupied, MAX_VOX_MODELS, minVoxFactorForModels } from '../src/lib/writers/collision-vox.js';
 
 // Linear block index: bx + by*nbx + bz*nbx*nby. The buffer stores blocks
 // keyed on this linear index now (not morton).
@@ -1824,6 +1825,136 @@ const parseVox = (bytes) => {
     };
 };
 
+/**
+ * Parse every model and the nTRN/nGRP/nSHP scene graph of a .vox file, and
+ * reassemble the voxels back into one absolute-coordinate set.
+ *
+ * Mirrors what an importer does, so a tiled file is validated by the same route
+ * a consumer would take rather than by trusting the writer.
+ *
+ * @param {Uint8Array} bytes - File contents.
+ * @returns {object} Models, nodes and the reassembled voxel set.
+ */
+const parseVoxScene = (bytes) => {
+    const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let off = 8;
+    const models = [];
+    const nodes = { trn: [], grp: [], shp: [] };
+    let pendingSize = null;
+
+    const readString = (o) => {
+        const len = buf.readInt32LE(o);
+        return { value: buf.toString('utf8', o + 4, o + 4 + len), next: o + 4 + len };
+    };
+    const readDict = (o) => {
+        const pairs = buf.readInt32LE(o);
+        let cur = o + 4;
+        const dict = {};
+        for (let i = 0; i < pairs; i++) {
+            const k = readString(cur);
+            const v = readString(k.next);
+            dict[k.value] = v.value;
+            cur = v.next;
+        }
+        return { dict, next: cur };
+    };
+
+    while (off < buf.length) {
+        const id = buf.toString('ascii', off, off + 4);
+        const contentSize = buf.readInt32LE(off + 4);
+        const childrenSize = buf.readInt32LE(off + 8);
+        const c = off + 12;
+        if (id === 'MAIN') {
+            off = c + contentSize;
+            continue;
+        }
+        if (id === 'SIZE') {
+            pendingSize = [buf.readInt32LE(c), buf.readInt32LE(c + 4), buf.readInt32LE(c + 8)];
+        } else if (id === 'XYZI') {
+            const n = buf.readInt32LE(c);
+            const voxels = [];
+            for (let i = 0; i < n; i++) {
+                const o = c + 4 + i * 4;
+                voxels.push([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
+            }
+            models.push({ size: pendingSize, voxels });
+            pendingSize = null;
+        } else if (id === 'nTRN') {
+            const nodeId = buf.readInt32LE(c);
+            const attrs = readDict(c + 4);
+            let o = attrs.next;
+            const childId = buf.readInt32LE(o);
+            const reserved = buf.readInt32LE(o + 4);
+            const layer = buf.readInt32LE(o + 8);
+            const frames = buf.readInt32LE(o + 12);
+            o += 16;
+            const frameDicts = [];
+            for (let f = 0; f < frames; f++) {
+                const d = readDict(o);
+                frameDicts.push(d.dict);
+                o = d.next;
+            }
+            nodes.trn.push({ nodeId, childId, reserved, layer, frames, frameDicts });
+        } else if (id === 'nGRP') {
+            const nodeId = buf.readInt32LE(c);
+            const attrs = readDict(c + 4);
+            const num = buf.readInt32LE(attrs.next);
+            const children = [];
+            for (let i = 0; i < num; i++) children.push(buf.readInt32LE(attrs.next + 4 + i * 4));
+            nodes.grp.push({ nodeId, children });
+        } else if (id === 'nSHP') {
+            const nodeId = buf.readInt32LE(c);
+            const attrs = readDict(c + 4);
+            const num = buf.readInt32LE(attrs.next);
+            const modelIds = [];
+            let o = attrs.next + 4;
+            for (let i = 0; i < num; i++) {
+                modelIds.push(buf.readInt32LE(o));
+                o = readDict(o + 4).next;
+            }
+            nodes.shp.push({ nodeId, modelIds });
+        }
+        off = c + contentSize + childrenSize;
+    }
+
+    // walk the graph the way an importer does, accumulating translations
+    const trnById = new Map(nodes.trn.map(n => [n.nodeId, n]));
+    const grpById = new Map(nodes.grp.map(n => [n.nodeId, n]));
+    const shpById = new Map(nodes.shp.map(n => [n.nodeId, n]));
+    const placed = [];
+
+    const visit = (nodeId, tx, ty, tz) => {
+        if (trnById.has(nodeId)) {
+            const n = trnById.get(nodeId);
+            const t = (n.frameDicts[0] ?? {})._t;
+            const [dx, dy, dz] = t ? t.split(' ').map(Number) : [0, 0, 0];
+            visit(n.childId, tx + dx, ty + dy, tz + dz);
+        } else if (grpById.has(nodeId)) {
+            for (const child of grpById.get(nodeId).children) visit(child, tx, ty, tz);
+        } else if (shpById.has(nodeId)) {
+            for (const m of shpById.get(nodeId).modelIds) {
+                const model = models[m];
+                // _t is the model centre, so its corner is _t - floor(size/2)
+                const ox = tx - Math.floor(model.size[0] / 2);
+                const oy = ty - Math.floor(model.size[1] / 2);
+                const oz = tz - Math.floor(model.size[2] / 2);
+                for (const [x, y, z, idx] of model.voxels) {
+                    placed.push([ox + x, oy + y, oz + z, idx]);
+                }
+            }
+        }
+    };
+
+    if (nodes.trn.length > 0) {
+        visit(0, 0, 0, 0);
+    } else {
+        // single model, no scene graph
+        for (const [x, y, z, idx] of models[0].voxels) placed.push([x, y, z, idx]);
+    }
+
+    return { models, nodes, placed, byteLength: buf.length };
+};
+
 const linearToSrgb8 = (c) => {
     const s = c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055;
     return Math.min(255, Math.max(0, Math.round(s * 255)));
@@ -1913,98 +2044,142 @@ describe('buildCollisionVox', () => {
         }
     });
 
-    it('should reject a grid larger than the vox coordinate range', () => {
-        // XYZI stores coordinates as single bytes, so 256 per axis is the ceiling
-        const grid = new SparseVoxelGrid(260, 4, 4);
-        grid.setVoxel(0, 0, 0);
-        grid.setVoxel(259, 0, 0);
-        const bounds = makeGridBounds(0, 0, 0, 260, 4, 4);
+    it('should tile a region wider than the per-axis limit', () => {
+        // XYZI stores coordinates as single bytes, so a region over 256 voxels
+        // wide has to become several models placed by the scene graph
+        const grid = new SparseVoxelGrid(600, 4, 4);
+        for (let x = 0; x < 600; x++) grid.setVoxel(x, 0, 0);
+        const bounds = makeGridBounds(0, 0, 0, 600, 4, 4);
 
-        assert.throws(
-            () => buildCollisionVox(grid, bounds, 1.0, voxColorSource(4)),
-            /exceeds the MagicaVoxel limit/,
-            'must explain the per-axis limit rather than emit a corrupt file');
-    });
+        const bytes = buildCollisionVox(grid, bounds, 1.0, voxColorSource(4));
+        assert.ok(bytes, 'a wide region should still produce a file');
 
-    it('should name a voxel size that would fit when rejecting', () => {
-        const grid = new SparseVoxelGrid(1024, 4, 4);
-        grid.setVoxel(0, 0, 0);
-        grid.setVoxel(1023, 0, 0);
-        const bounds = makeGridBounds(0, 0, 0, 1024, 4, 4);
-
-        // 1024 voxels at 0.02 spans 20.48 units, so 20.48/256 = 0.08 fits
-        assert.throws(
-            () => buildCollisionVox(grid, bounds, 0.02, voxColorSource(4)),
-            /--collision-voxels-size 0\.08\b/,
-            'the error should name a size the user can actually pass');
-    });
-});
-
-describe('vox size suggestion', () => {
-    // The suggested --collision-voxels-size has to be usable first time. Coarse
-    // cells align to the grid origin rather than to the occupied region, so a
-    // suggestion derived from span/256 alone can still be one cell too small.
-    const occupiedSpanning = (minIx, maxIx) => {
-        const nx = (((maxIx + 4) >> 2) << 2);
-        const grid = new SparseVoxelGrid(Math.max(4, nx), 4, 4);
-        grid.setVoxel(minIx, 0, 0);
-        grid.setVoxel(maxIx, 0, 0);
-        return enumerateOccupied(grid);
-    };
-
-    it('should suggest a factor that actually fits, for every offset', () => {
-        // offsets make the occupied region straddle coarse cell boundaries
-        for (let offset = 0; offset < 24; offset++) {
-            for (const span of [257, 300, 512, 513, 1000, 1024, 2411]) {
-                const occupied = occupiedSpanning(offset, offset + span - 1);
-                const factor = minVoxFactor(occupied);
-                assert.ok(voxFitsAt(occupied, factor),
-                    `offset ${offset} span ${span}: factor ${factor} does not fit`);
-                assert.ok(factor === 1 || !voxFitsAt(occupied, factor - 1),
-                    `offset ${offset} span ${span}: factor ${factor} is not minimal`);
+        const scene = parseVoxScene(bytes);
+        assert.strictEqual(scene.models.length, 3, '600 voxels needs ceil(600/256) = 3 models');
+        for (const m of scene.models) {
+            for (const axis of m.size) {
+                assert.ok(axis <= 256, `model axis ${axis} exceeds the format limit`);
             }
         }
+
+        // reassembled through the scene graph, the row must come back intact
+        assert.strictEqual(scene.placed.length, 600);
+        const xs = scene.placed.map(v => v[0]).sort((a, b) => a - b);
+        assert.strictEqual(xs[0], xs[0]);
+        for (let i = 0; i < 600; i++) {
+            assert.strictEqual(xs[i] - xs[0], i,
+                'reassembled voxels must form one contiguous run with no gaps or overlaps');
+        }
+        const ys = new Set(scene.placed.map(v => v[1]));
+        const zs = new Set(scene.placed.map(v => v[2]));
+        assert.strictEqual(ys.size, 1, 'the row is one voxel thick in Y');
+        assert.strictEqual(zs.size, 1, 'the row is one voxel thick in Z');
     });
 
-    it('should suggest 1 when the region already fits', () => {
-        const occupied = occupiedSpanning(0, 255);
-        assert.strictEqual(minVoxFactor(occupied), 1);
-        assert.strictEqual(minVoxelSizeForVox(occupied, 0.02), 0.02);
+    it('should build a well-formed scene graph for tiled models', () => {
+        const grid = new SparseVoxelGrid(600, 4, 4);
+        for (let x = 0; x < 600; x++) grid.setVoxel(x, 0, 0);
+        const bounds = makeGridBounds(0, 0, 0, 600, 4, 4);
+        const scene = parseVoxScene(buildCollisionVox(grid, bounds, 1.0, voxColorSource(4)));
+
+        // one root transform plus one per model
+        assert.strictEqual(scene.nodes.trn.length, 1 + scene.models.length);
+        assert.strictEqual(scene.nodes.grp.length, 1);
+        assert.strictEqual(scene.nodes.shp.length, scene.models.length);
+
+        const root = scene.nodes.trn.find(n => n.nodeId === 0);
+        assert.ok(root, 'root transform must have node id 0');
+        assert.strictEqual(root.childId, 1, 'root must point at the group');
+        assert.strictEqual(root.reserved, -1, 'reserved id must be -1');
+        assert.strictEqual(root.frames, 1, 'frame count must be > 0');
+
+        const group = scene.nodes.grp[0];
+        assert.strictEqual(group.nodeId, 1);
+        assert.strictEqual(group.children.length, scene.models.length);
+
+        // every group child is a transform whose child is a shape
+        for (const childId of group.children) {
+            const trn = scene.nodes.trn.find(n => n.nodeId === childId);
+            assert.ok(trn, `group child ${childId} is not a transform`);
+            assert.strictEqual(trn.reserved, -1);
+            const shp = scene.nodes.shp.find(n => n.nodeId === trn.childId);
+            assert.ok(shp, `transform ${childId} does not point at a shape`);
+            assert.strictEqual(shp.modelIds.length, 1);
+        }
+
+        // model ids must cover 0..n-1 exactly once
+        const referenced = scene.nodes.shp.flatMap(n => n.modelIds).sort((a, b) => a - b);
+        assert.deepStrictEqual(referenced, scene.models.map((_, i) => i));
     });
 
-    it('should accept the suggested size without a second failure', () => {
-        // reproduces the case where following the advice failed again: a
-        // 2411-voxel span at 0.02 whose span/256 factor leaves 257 coarse cells
-        const grid = new SparseVoxelGrid(2412, 4, 4);
-        grid.setVoxel(1, 0, 0);
-        grid.setVoxel(2411, 0, 0);
-        const bounds = makeGridBounds(0, 0, 0, 2412 * 0.02, 4 * 0.02, 4 * 0.02);
+    it('should not emit a scene graph for a single model', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        const scene = parseVoxScene(buildCollisionVox(solidGrid(), bounds, 1.0, voxColorSource(4)));
+        assert.strictEqual(scene.models.length, 1);
+        assert.strictEqual(scene.nodes.trn.length, 0, 'a single model needs no transform');
+        assert.strictEqual(scene.nodes.grp.length, 0);
+        assert.strictEqual(scene.nodes.shp.length, 0);
+    });
+
+    it('should tile in all three axes and reassemble exactly', () => {
+        // a hollow-ish shell spanning >256 on every axis, so tiles are needed in
+        // X, Y and Z and some tiles are empty
+        const n = 300;
+        const grid = new SparseVoxelGrid(n, n, n);
+        const expected = new Set();
+        for (let i = 0; i < n; i += 7) {
+            for (let j = 0; j < n; j += 11) {
+                grid.setVoxel(i, j, 0);
+                grid.setVoxel(i, j, n - 1);
+                grid.setVoxel(i, 0, j);
+                expected.add(`${i},${j},0`);
+                expected.add(`${i},${j},${n - 1}`);
+                expected.add(`${i},0,${j}`);
+            }
+        }
+        const bounds = makeGridBounds(0, 0, 0, n, n, n);
+        const scene = parseVoxScene(buildCollisionVox(grid, bounds, 1.0, voxColorSource(4)));
+
+        assert.ok(scene.models.length > 1, 'should have split into several models');
+        for (const m of scene.models) {
+            for (const axis of m.size) assert.ok(axis <= 256, `axis ${axis} over limit`);
+        }
+        assert.strictEqual(scene.placed.length, expected.size,
+            'every voxel must be placed exactly once');
+        // no two placed voxels may share a position
+        const positions = new Set(scene.placed.map(v => `${v[0]},${v[1]},${v[2]}`));
+        assert.strictEqual(positions.size, scene.placed.length,
+            'tiles must not overlap');
+    });
+
+    it('should reject a region needing more models than the ceiling', () => {
+        // a diagonal so every tile along it is non-empty
+        const n = 256 * (MAX_VOX_MODELS + 8);
+        const grid = new SparseVoxelGrid(n, 4, 4);
+        for (let t = 0; t <= MAX_VOX_MODELS + 4; t++) grid.setVoxel(t * 256, 0, 0);
         const occupied = enumerateOccupied(grid);
 
-        const suggested = minVoxelSizeForVox(occupied, 0.02);
-        const factor = Math.max(1, Math.round(suggested / 0.02));
-
-        // the suggestion must survive the round trip through the CLI's rounding
-        assert.doesNotThrow(() => assertVoxFits(occupied, 0.02, factor),
-            `suggested size ${suggested} still does not fit`);
-
-        const plan = downsampleGrid(grid, bounds, 0.02, factor);
-        const out = enumerateOccupied(plan.grid);
-        assert.ok(out.maxIx - out.minIx + 1 <= 256,
-            'the reduced grid must fit the per-axis limit');
+        assert.ok(countVoxModels(occupied, 1) > MAX_VOX_MODELS);
+        assert.throws(
+            () => assertVoxFits(occupied, 0.01, 1),
+            /needs more than 256 models/,
+            'must explain the model ceiling rather than emit a corrupt file');
+        assert.throws(
+            () => assertVoxFits(occupied, 0.01, 1),
+            /--collision-voxels-size/,
+            'must name the flag that fixes it');
     });
-});
 
-describe('minVoxelSizeForVox', () => {
-    it('should return the span divided by the 256 axis limit', () => {
-        const grid = new SparseVoxelGrid(1024, 4, 4);
-        grid.setVoxel(0, 0, 0);
-        grid.setVoxel(1023, 0, 0);
+    it('should suggest a size that brings the model count under the ceiling', () => {
+        const n = 256 * (MAX_VOX_MODELS + 8);
+        const grid = new SparseVoxelGrid(n, 4, 4);
+        for (let t = 0; t <= MAX_VOX_MODELS + 4; t++) grid.setVoxel(t * 256, 0, 0);
         const occupied = enumerateOccupied(grid);
 
-        assert.strictEqual(occupied.count, 2);
-        assert.strictEqual(occupied.maxIx - occupied.minIx + 1, 1024);
-        assert.strictEqual(minVoxelSizeForVox(occupied, 0.02), 1024 * 0.02 / 256);
+        const factor = minVoxFactorForModels(occupied);
+        assert.ok(countVoxModels(occupied, factor) <= MAX_VOX_MODELS,
+            `suggested factor ${factor} still needs too many models`);
+        assert.doesNotThrow(() => assertVoxFits(occupied, 0.01, factor));
     });
 });
 
@@ -2049,4 +2224,159 @@ describe('downsampleGrid', () => {
     const voxColorSourceForDownsample = () => makeSplatColorSource([
         { center: [0, 0, 0], extent: 40, color: [1, 0, 0], logit: 0 }
     ], 'average');
+});
+
+describe('buildCollisionVox samples only visible voxels', () => {
+    // A MagicaVoxel voxel enclosed on all six sides cannot be seen, so paying a
+    // BVH query for it is pure waste. On a solid volume the interior vastly
+    // outnumbers the surface: a 200x180x204 house at 5 mm is 3.07M occupied
+    // voxels but only ~400K of them are on the surface, and sampling all of
+    // them made the .vox 8x slower than the equivalent collision mesh.
+
+    /**
+     * Count BVH overlap queries issued while `fn` runs.
+     *
+     * @param {GaussianBVH} bvh - BVH to instrument.
+     * @param {() => void} fn - Work to measure.
+     * @returns {number} Number of queries issued.
+     */
+    const countQueries = (bvh, fn) => {
+        const real = bvh.queryOverlappingRawInto.bind(bvh);
+        let calls = 0;
+        bvh.queryOverlappingRawInto = (...args) => {
+            calls++;
+            return real(...args);
+        };
+        try {
+            fn();
+        } finally {
+            bvh.queryOverlappingRawInto = real;
+        }
+        return calls;
+    };
+
+    /**
+     * A solid cube of voxels, so interior and surface counts differ sharply.
+     *
+     * @param {number} n - Edge length in voxels (multiple of 4).
+     * @returns {SparseVoxelGrid} Filled grid.
+     */
+    const solidCube = (n) => {
+        const grid = new SparseVoxelGrid(n, n, n);
+        for (let z = 0; z < n; z++) {
+            for (let y = 0; y < n; y++) {
+                for (let x = 0; x < n; x++) grid.setVoxel(x, y, z);
+            }
+        }
+        return grid;
+    };
+
+    const source = () => makeSplatColorSource([
+        { center: [0, 0, 0], extent: 20, color: [1, 0, 0], logit: 2 },
+        { center: [8, 8, 8], extent: 20, color: [0, 0, 1], logit: 2 }
+    ], 'average');
+
+    it('should query the BVH once per surface voxel, not per occupied voxel', () => {
+        const n = 16;
+        const grid = solidCube(n);
+        const bounds = makeGridBounds(0, 0, 0, n, n, n);
+
+        const occupied = n ** 3;                     // 4096
+        const surface = occupied - (n - 2) ** 3;     // 4096 - 2744 = 1352
+
+        const cs = source();
+        const queries = countQueries(cs.bvh, () => {
+            buildCollisionVox(grid, bounds, 1.0, cs);
+        });
+
+        assert.strictEqual(queries, surface,
+            `expected one query per surface voxel (${surface}), got ${queries} ` +
+            `of ${occupied} occupied`);
+    });
+
+    it('should still emit every occupied voxel', () => {
+        const n = 16;
+        const grid = solidCube(n);
+        const bounds = makeGridBounds(0, 0, 0, n, n, n);
+
+        const vox = parseVox(buildCollisionVox(grid, bounds, 1.0, source()));
+        assert.deepStrictEqual(vox.dims, [n, n, n]);
+        assert.strictEqual(vox.voxels.length, n ** 3,
+            'interior voxels must still be written, only their colour is derived');
+        for (const [,,, idx] of vox.voxels) {
+            assert.ok(idx >= 1, 'no voxel may use the empty palette index');
+        }
+    });
+
+    it('should give interior voxels a colour taken from the surface', () => {
+        const n = 16;
+        const grid = solidCube(n);
+        const bounds = makeGridBounds(0, 0, 0, n, n, n);
+
+        const vox = parseVox(buildCollisionVox(grid, bounds, 1.0, source()));
+
+        // every colour used anywhere must also appear on the surface, i.e.
+        // interior voxels introduce no colour of their own
+        const onSurface = new Set();
+        const interior = new Set();
+        for (const [x, y, z, idx] of vox.voxels) {
+            const isSurface = x === 0 || y === 0 || z === 0 ||
+                x === n - 1 || y === n - 1 || z === n - 1;
+            (isSurface ? onSurface : interior).add(idx);
+        }
+        assert.ok(interior.size > 0, 'fixture must have interior voxels');
+        for (const idx of interior) {
+            assert.ok(onSurface.has(idx),
+                `interior palette index ${idx} does not occur on the surface`);
+        }
+    });
+});
+
+describe('buildCollisionVox large-model warning', () => {
+    it('should warn once the voxel count makes the file impractical', () => {
+        // 8M voxels is ~32MB of XYZI; past that MagicaVoxel is not usable, and
+        // the tiling makes it easy to reach without noticing
+        const n = 256;
+        const grid = new SparseVoxelGrid(n, n, n);
+        for (let z = 0; z < n; z++) {
+            for (let y = 0; y < n; y++) {
+                for (let x = 0; x < n; x++) grid.setVoxel(x, y, z);
+            }
+        }
+        const bounds = makeGridBounds(0, 0, 0, n, n, n);
+        const cs = makeSplatColorSource([
+            { center: [128, 128, 128], extent: 300, color: [1, 0, 0], logit: 2 }
+        ], 'average');
+
+        const warnings = [];
+        const original = logger.warn;
+        logger.warn = msg => warnings.push(msg);
+        try {
+            buildCollisionVox(grid, bounds, 1.0, cs);
+        } finally {
+            logger.warn = original;
+        }
+
+        assert.strictEqual(warnings.length, 1, `expected one warning, got ${warnings.length}`);
+        assert.match(warnings[0], /MagicaVoxel is unlikely to open it usefully/);
+        assert.match(warnings[0], /--collision-voxels-size/,
+            'the warning should name the flag that fixes it');
+    });
+
+    it('should not warn for a small model', () => {
+        const bounds = makeGridBounds(0, 0, 0, 4, 4, 4);
+        const cs = makeSplatColorSource([
+            { center: [2, 2, 2], extent: 8, color: [1, 0, 0], logit: 2 }
+        ], 'average');
+
+        const warnings = [];
+        const original = logger.warn;
+        logger.warn = msg => warnings.push(msg);
+        try {
+            buildCollisionVox(solidGrid(), bounds, 1.0, cs);
+        } finally {
+            logger.warn = original;
+        }
+        assert.deepStrictEqual(warnings, []);
+    });
 });

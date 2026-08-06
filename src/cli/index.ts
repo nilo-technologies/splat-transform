@@ -907,7 +907,7 @@ VOXEL OUTPUT (.voxel.json)
         --collision-color-smooth    <r>   Edge-preserving denoise of vertex colors within r voxels before quantizing. Only perceptually similar neighbours are averaged, so material boundaries stay crisp. Default: 2 with --collision-color-palette, off otherwise. Use 0 to disable
         --collision-color-coherent  <r>   Snap each vertex to the dominant palette colour within r voxels, removing speckle. Default: off
         --collision-voxels  <file.vox>    Also write the collision voxels as a MagicaVoxel .vox model, coloured per voxel from the splats. Default: off
-        --collision-voxels-size <size>    Voxel size for the .vox only, so it can fit the format's 256-per-axis limit while the octree and collision mesh stay finer. Default: --voxel-params size
+        --collision-voxels-size <size>    Voxel size for the .vox only, leaving the octree and collision mesh finer. Regions over 256 voxels/axis are tiled into several models automatically, so this is for keeping model count and file size sensible. Default: --voxel-params size
 
 IMAGE OUTPUT (.webp) — lossless WebP rendered via GPU rasterizer
         --projection       <pinhole|equirect>  Camera projection. Default: pinhole.
