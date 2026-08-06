@@ -131,6 +131,10 @@ class NodeReadFileSystem implements ReadFileSystem {
 // Write implementations
 // ============================================================================
 
+// fs.write() takes `length` as a signed 32-bit int, so writes are issued in
+// chunks no larger than this.
+const MAX_WRITE_CHUNK = 1 << 30;
+
 /**
  * Writer implementation for writing to Node.js file handles.
  */
@@ -143,7 +147,11 @@ class FileWriter implements Writer {
         this.write = async (data: Uint8Array) => {
             let offset = 0;
             while (offset < data.byteLength) {
-                const { bytesWritten } = await fileHandle.write(data, offset, data.byteLength - offset);
+                // `length` must fit a signed 32-bit int, so a buffer larger than
+                // 2 GiB has to go out in several calls. Large collision meshes
+                // reach that size.
+                const length = Math.min(data.byteLength - offset, MAX_WRITE_CHUNK);
+                const { bytesWritten } = await fileHandle.write(data, offset, length);
                 if (bytesWritten === 0) {
                     throw new Error('Failed to write all data to file.');
                 }
