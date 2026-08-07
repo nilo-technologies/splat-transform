@@ -91,11 +91,11 @@ export type { Projection, RenderCamera, CameraBasis } from './render';
 
 // Voxel
 export {
-    alignGridBounds, carve, fillExterior, fillFloor, filterAndFillBlocks, filterCluster,
-    filterFloaters, findClusterVoxelFlood, voxelizeToBuffer,
+    alignGridBounds, applyAlignYaw, carve, estimateAlignYaw, fillExterior, fillFloor,
+    filterAndFillBlocks, filterCluster, filterFloaters, findClusterVoxelFlood, voxelizeToBuffer,
     BlockMaskBuffer, SparseVoxelGrid, BLOCK_EMPTY, BLOCK_MIXED, BLOCK_SOLID
 } from './voxel';
-export type { NavSeed, NavSimplifyResult } from './voxel';
+export type { AlignYawApplied, AlignYawOptions, AlignYawResult, NavSeed, NavSimplifyResult, UpAxis } from './voxel';
 
 // Types
 export type { CollisionMeshShape, CollisionColorMode, CollisionColorPalette, Options, Param, DeviceCreator } from './types';

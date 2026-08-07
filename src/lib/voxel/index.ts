@@ -10,3 +10,5 @@ export { carve } from './carve';
 export { fillExterior } from './fill-exterior';
 export { fillFloor } from './fill-floor';
 export type { NavSeed, NavSimplifyResult } from './fill-exterior';
+export { estimateAlignYaw, applyAlignYaw } from './align-yaw';
+export type { AlignYawOptions, AlignYawResult, AlignYawApplied, UpAxis } from './align-yaw';
