@@ -16,9 +16,16 @@ import { SparseVoxelGrid } from '../voxel/sparse-voxel-grid';
  * @param positions - Vertex positions (3 floats per vertex)
  * @param indices - Triangle indices (3 per triangle, unsigned 32-bit)
  * @param colors - Optional linear-space vertex colors (3 floats per vertex)
+ * @param nodeRotation - Optional node rotation quaternion (x, y, z, w) applied
+ * to the mesh node. Omitted (or null) leaves the node with no rotation.
  * @returns GLB file as a Uint8Array
  */
-function encodeGlb(positions: Float32Array, indices: Uint32Array, colors?: Float32Array): Uint8Array {
+function encodeGlb(
+    positions: Float32Array,
+    indices: Uint32Array,
+    colors?: Float32Array,
+    nodeRotation?: [number, number, number, number] | null
+): Uint8Array {
     const vertexCount = positions.length / 3;
     const indexCount = indices.length;
 
@@ -101,7 +108,7 @@ function encodeGlb(positions: Float32Array, indices: Uint32Array, colors?: Float
         asset: { version: '2.0', generator: 'splat-transform' },
         scene: 0,
         scenes: [{ nodes: [0] }],
-        nodes: [{ mesh: 0 }],
+        nodes: [nodeRotation ? { mesh: 0, rotation: nodeRotation } : { mesh: 0 }],
         meshes: [{
             primitives: [primitive]
         }],
@@ -274,6 +281,9 @@ const writeFaceColorOfTri = (
  * palette quantisation, optional spatial smooth/coherence radii, and optional
  * flat-shade setting used to colorize mesh vertices. Required for the `voxel`
  * and `tris` shapes, ignored otherwise.
+ * @param options - Extra options.
+ * @param options.nodeRotation - Optional node rotation quaternion (x, y, z, w)
+ * applied to the mesh node. Omitted (or null) leaves the node with no rotation.
  * @returns GLB bytes, or null if no triangles were generated
  * @throws Error if shape is `voxel` or `tris` and `colorSource` is null
  */
@@ -290,7 +300,8 @@ const buildCollisionMesh = (
         flatShade?: boolean;
         smoothRadius?: number;
         coherentRadius?: number;
-    } | null = null
+    } | null = null,
+    options: { nodeRotation?: [number, number, number, number] | null } = {}
 ): Uint8Array | null => {
     const g = logger.group('Collision mesh');
 
@@ -530,11 +541,11 @@ const buildCollisionMesh = (
     }
 
     const encodeSub = logger.group('Encoding GLB');
-    const glb = encodeGlb(finalMesh.positions, finalMesh.indices, colors);
+    const glb = encodeGlb(finalMesh.positions, finalMesh.indices, colors, options.nodeRotation);
     encodeSub.end();
 
     g.end();
     return glb;
 };
 
-export { buildCollisionMesh };
+export { buildCollisionMesh, encodeGlb };
