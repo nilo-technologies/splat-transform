@@ -292,6 +292,127 @@ proxy ranks angles correctly. Expectation: `landscape.spz` (organic terrain)
 trips the guard and stays at 0 degrees; if it does not, the guard is too loose.
 Results table lands in this document.
 
+### Validation results
+
+Run on 2026-08-07, CLI built from `9978b5c` (`--collision-voxels`,
+`--voxel-params 0.05,0.1` unless noted). Occupied voxel counts and `.vox` byte
+sizes are exact (parsed from the `XYZI` chunk), not the rounded figures the CLI
+log prints.
+
+#### Step 1: with vs. without `--auto-rotate`
+
+| Scene | `auto-rotate` result | `.vox` grid dims | occupied voxels | `.vox` size | models | wall time |
+| --- | --- | --- | --- | --- | --- | --- |
+| `house.ply` | no rotation — best yaw saves 0.0% (unguarded: yaw 0.19deg, improvement 0.0037%), below 2.0% threshold | 20×21×18 (both) | 4382 (both) | 18624 B (both) | 1 | base 0.61s / aligned 0.66s |
+| `industrial.ply` | no rotation — best yaw saves 0.0% (unguarded: yaw -0.13deg, improvement 0.0015%), below 2.0% threshold | 22×22×12 (both) | 1704 (both) | 7912 B (both) | 1 | base 0.69s / aligned 0.72s |
+| `dungeons-3.ply` | no rotation — best yaw saves 0.2% (unguarded: yaw 1.67deg, improvement 0.183%), below 2.0% threshold | 19×20×12 (both) | 2017 (both) | 9164 B (both) | 1 | base 0.56s / aligned 0.59s |
+| `landscape.spz`¹ | no rotation — best yaw saves 0.1% (unguarded: yaw 4.88deg, improvement 0.051%), below 2.0% threshold | 289×426×173 (both) | 1,606,758 (both) | 6,428,558 B (both) | 3 | base 6.08s / aligned 6.31s |
+
+¹ `landscape.spz` crashes with `--voxel-params 0.05,0.1` as specified — see
+"Deviation and a bug found" below. Its row uses `--voxel-params 2.0,0.1`
+instead; the base-vs-aligned comparison is still apples-to-apples since both
+runs used the same params.
+
+For all four scenes the guard fired, so `.vox`, `.voxel.bin` and `.voxel.json`
+are **byte-identical** with and without `--auto-rotate` (`cmp` confirms it;
+`.voxel.json` stays `version: "1.1"` with no `rotation` key), exactly as the
+output contract promises for a zero-yaw result.
+
+None of the four real scenes has a real yaw problem: all four are already
+within about 5 degrees of axis-aligned, so `--auto-rotate` correctly declines
+to touch any of them. Since none of them exercises the "genuine misalignment"
+path, a fifth, synthetic case was added to test that path against real
+splat geometry (not the synthetic constructed Gaussians `align-yaw.test.mjs`
+already covers): `dungeons-3.ply` rotated by a known `+20deg` yaw
+(`--rotate 0,20,0`), which recovers this scene's own tiny inherent tilt too:
+
+| Scene | `auto-rotate` result | `.vox` grid dims | occupied voxels | `.vox` size | wall time |
+| --- | --- | --- | --- | --- | --- |
+| `dungeons-3.ply` + `--rotate 0,20,0`, no `--auto-rotate` | n/a | 24×23×12 | 2050 | 9296 B | 0.57s |
+| same, `--auto-rotate` | yaw -18.33deg, est. 8% fewer surface voxels (193K/262K splats voted) | 20×20×12 | 2021 | 9180 B | 0.57s |
+
+Applying the estimated -18.33deg to a scene rotated by +20deg leaves a residual
+of +1.67deg — matching `dungeons-3.ply`'s own unguarded estimate (1.67deg)
+almost exactly, and `costBest` for the rotated case (1.080603) matches
+`dungeons-3.ply`'s own `costBest` (1.080602) to 5 decimal places. The estimator
+is measuring the same underlying geometry either way, as it should. Occupied
+voxels dropped 1.4% (2050 → 2021), correctly signed but smaller in magnitude
+than the estimator's 8% cost-function figure — expected, since the cost
+function is a staircase proxy over surface-facing normals, not a literal count
+of the final `.vox` (which also includes interior fill and is affected by
+grid cropping to the rotated AABB; see "Risks").
+
+#### Step 2: sweep vs. the estimator's pick
+
+Swept `dungeons-3.ply` (the real scene with the largest, if tiny, predicted
+improvement) at the angles the brief specifies, `--voxel-params 0.05,0.1`,
+comparing exact `.vox` occupied-voxel counts:
+
+| yaw (deg) | -30 | -20 | -10 | 0 | 10 | 20 | 30 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| occupied voxels | 2055 | 2036 | 2019 | **2017** | 2031 | 2050 | 2049 |
+
+The true minimum sits at 0deg, matching the unguarded estimate of 1.67deg to
+well within "a few degrees" — **confirmed**, not contradicted. Given how flat
+this curve is (all four real scenes are near-aligned), this sweep alone is a
+weak test of the sign convention, so the same sweep was repeated on the
+synthetic `+20deg`-rotated `dungeons-3.ply` from Step 1, which has a real,
+sizeable misalignment to find:
+
+| yaw (deg) | -30 | -20 | -18.33 (estimate) | -10 | 0 | 10 | 20 | 30 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| occupied voxels | 2019 | **2017** | 2021 | 2031 | 2050 | 2049 | 2075 | 2082 |
+
+The true minimum sits at -20deg, 1.67deg from the estimator's -18.33deg pick
+(the same residual as above — it is `dungeons-3.ply`'s own inherent tilt,
+correctly not fully cancelled) and well inside the "confirmed" band. This is
+the stronger of the two sweeps: it demonstrates the proxy ranks angles
+correctly on a genuine, real-geometry misalignment, not just on near-flat data.
+**Confirmed.**
+
+#### Guard calibration
+
+`minImprovement` (default 0.02) **held; not changed.** Evidence for keeping it:
+
+- No real scene with obvious man-made structure was incorrectly rejected: all
+  three (`house.ply`, `industrial.ply`, `dungeons-3.ply`) have genuinely tiny
+  misalignment (0.19deg, -0.13deg, 1.67deg), so a near-zero predicted
+  improvement is the *correct* answer, not evidence the guard is too strict.
+- `landscape.spz` (organic terrain) tripped the guard and stayed at 0 degrees,
+  exactly as predicted in the "Validation experiment" section above.
+- The synthetic +20deg misalignment produced 7.94% predicted improvement,
+  comfortably clear of the 2% threshold, so the guard does not swallow a real
+  yaw problem either. This is consistent with Task 1's synthetic-Gaussian
+  finding (a 17deg tilt producing ~19.9% improvement).
+
+No scene in this experiment falls near the 2% boundary, so this run cannot
+distinguish "0.02 is exactly right" from "0.02 is roughly right"; it only
+rules out "0.02 is badly miscalibrated" in either direction.
+
+#### Deviation and a bug found
+
+`landscape.spz` with the brief's literal `--voxel-params 0.05,0.1` crashes
+during the filtering stage, with or without `--auto-rotate` (so this is
+unrelated to this feature):
+
+```
+✗ RangeError: Invalid typed array length: -2147483648
+    at new Float64Array (<anonymous>)
+    at new IntKeyMap (.../dist/cli.mjs:46964:21)
+    at filterAndFillBlocks (.../dist/cli.mjs:68677:22)
+```
+
+`landscape.spz`'s scene extents are roughly 593 × 370 × 882 units — two to
+three orders of magnitude larger than `house.ply`/`industrial.ply`/
+`dungeons-3.ply` (~1 unit across). At `0.05` that is well over a billion 4×4×4
+blocks, and `IntKeyMap`'s capacity computation (`1 << (32 - Math.clz32(...))`)
+overflows a 32-bit signed shift at that scale, producing a negative
+`Float64Array` length. `--voxel-params 2.0,0.1` avoids it and was used for
+`landscape.spz`'s row above instead; this is an existing bug in
+`filterAndFillBlocks`'s block-count handling, not introduced by this feature,
+and out of this task's scope to fix (Task 10 only touches this spec and,
+conditionally, `minImprovement`). Worth its own follow-up ticket.
+
 ## Risks
 
 - **Old `.voxel.json` loaders** ignoring `rotation` misplace collision data by
