@@ -583,9 +583,14 @@ Add `import { Transform } from '../src/lib/utils/index.js';` to the imports, the
 
 ```javascript
     it('returns a yaw in output space when the table carries a transform', function () {
-        // Transform.PLY is a 180 degree roll about Z, which negates x and y.
-        // Same walls, so the applied yaw must agree modulo the grid's 90 degree
-        // symmetry.
+        // Transform.PLY is a 180 degree rotation about Z. These walls' normals
+        // (built from a yaw about Y starting at local +X) all lie in the XZ
+        // plane, which contains Z, the roll axis - so the rotation restricted
+        // to that plane degenerates to a 1-D reflection (x flips, z is
+        // invariant), mirroring each wall rather than preserving it. The two
+        // estimates are therefore negatives of each other mod 90, not equal:
+        // verified independently (brute-force argmin over the raw cost
+        // function, no dependency on estimateAlignYaw) during Task 3.
         const identity = makeWalls([17, 107, 197, 287]);
         const transformed = new DataTable(
             COLUMN_NAMES.map(name => new Column(name, identity.getColumnByName(name).data.slice())),
@@ -595,7 +600,7 @@ Add `import { Transform } from '../src/lib/utils/index.js';` to the imports, the
         const plain = estimateAlignYaw(identity);
         const withTransform = estimateAlignYaw(transformed);
 
-        const delta = Math.abs(plain.yawDegrees - withTransform.yawDegrees) % 90;
+        const delta = Math.abs(plain.yawDegrees + withTransform.yawDegrees) % 90;
         assert.ok(Math.min(delta, 90 - delta) < 0.5,
             `expected matching yaws, got ${plain.yawDegrees} and ${withTransform.yawDegrees}`);
         assert.strictEqual(withTransform.reason, undefined);
