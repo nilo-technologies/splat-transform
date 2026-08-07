@@ -11,28 +11,25 @@ import { Column, DataTable } from '../src/lib/index.js';
 import { MemoryFileSystem } from '../src/lib/io/write/index.js';
 import { resolveColorSmoothRadius, writeOctreeFiles, writeVoxel } from '../src/lib/writers/write-voxel.js';
 
+function makeOctree() {
+    return {
+        gridBounds: { min: new Vec3(0, 1, 2), max: new Vec3(3, 4, 5) },
+        sceneBounds: { min: new Vec3(-1, -2, -3), max: new Vec3(6, 7, 8) },
+        voxelResolution: 0.25,
+        leafSize: 4,
+        treeDepth: 2,
+        numInteriorNodes: 1,
+        numMixedLeaves: 1,
+        nodes: new Uint32Array([0x11223344, 0xAABBCCDD]),
+        leafData: new Uint32Array([0x01020304, 0xFFEEDDCC])
+    };
+}
+
 describe('writeOctreeFiles', function () {
     it('writes metadata and little-endian nodes followed by leafData', async function () {
         const fs = new MemoryFileSystem();
-        const octree = {
-            gridBounds: {
-                min: new Vec3(0, 1, 2),
-                max: new Vec3(3, 4, 5)
-            },
-            sceneBounds: {
-                min: new Vec3(-1, -2, -3),
-                max: new Vec3(6, 7, 8)
-            },
-            voxelResolution: 0.25,
-            leafSize: 4,
-            treeDepth: 2,
-            numInteriorNodes: 1,
-            numMixedLeaves: 1,
-            nodes: new Uint32Array([0x11223344, 0xAABBCCDD]),
-            leafData: new Uint32Array([0x01020304, 0xFFEEDDCC])
-        };
 
-        await writeOctreeFiles(fs, 'scene.voxel.json', octree);
+        await writeOctreeFiles(fs, 'scene.voxel.json', makeOctree());
 
         const jsonBytes = fs.results.get('scene.voxel.json');
         assert.ok(jsonBytes, 'metadata file should be written');
@@ -51,6 +48,27 @@ describe('writeOctreeFiles', function () {
             0x04, 0x03, 0x02, 0x01,
             0xCC, 0xDD, 0xEE, 0xFF
         ]);
+    });
+
+    it('omits the rotation field and stays at version 1.1 by default', async function () {
+        const fs = new MemoryFileSystem();
+
+        await writeOctreeFiles(fs, 'scene.voxel.json', makeOctree());
+
+        const metadata = JSON.parse(new TextDecoder().decode(fs.results.get('scene.voxel.json')));
+        assert.strictEqual(metadata.version, '1.1');
+        assert.ok(!('rotation' in metadata), 'rotation must not appear when unaligned');
+    });
+
+    it('writes the rotation and bumps to version 1.2 when aligned', async function () {
+        const fs = new MemoryFileSystem();
+        const rotation = [0, -0.2588190451, 0, 0.9659258263];
+
+        await writeOctreeFiles(fs, 'scene.voxel.json', makeOctree(), rotation);
+
+        const metadata = JSON.parse(new TextDecoder().decode(fs.results.get('scene.voxel.json')));
+        assert.strictEqual(metadata.version, '1.2');
+        assert.deepStrictEqual(metadata.rotation, rotation);
     });
 });
 

@@ -131,6 +131,9 @@ interface VoxelMetadata {
     /** Scene bounds (in PlayCanvas coordinate space for v1.1+) */
     sceneBounds: { min: number[]; max: number[] };
 
+    /** Rotation mapping voxel space back to source space as `[x, y, z, w]`. Present only in v1.2+, when auto-alignment was applied. */
+    rotation?: [number, number, number, number];
+
     /** Size of each voxel in world units */
     voxelResolution: number;
 
@@ -291,15 +294,17 @@ const cropToNavigable = (
  * @param fs - File system for writing output files.
  * @param jsonFilename - Output filename for JSON metadata.
  * @param octree - Sparse octree structure to write.
+ * @param rotation - Rotation mapping voxel space back to source space as `[x, y, z, w]`, when auto-alignment was applied. Bumps the metadata version to 1.2 and includes it in the output. Default: null (version 1.1, no rotation).
  */
 const writeOctreeFiles = async (
     fs: FileSystem,
     jsonFilename: string,
-    octree: SparseOctree
+    octree: SparseOctree,
+    rotation: [number, number, number, number] | null = null
 ): Promise<void> => {
     // Build metadata object
     const metadata: VoxelMetadata = {
-        version: '1.1',
+        version: rotation ? '1.2' : '1.1',
         asset: {
             generator: `splat-transform v${version}`
         },
@@ -319,6 +324,10 @@ const writeOctreeFiles = async (
         nodeCount: octree.nodes.length,
         leafDataCount: octree.leafData.length
     };
+
+    if (rotation) {
+        metadata.rotation = rotation;
+    }
 
     const jsonBytes = (new TextEncoder()).encode(JSON.stringify(metadata, null, 2));
     await writeFile(fs, jsonFilename, jsonBytes);
