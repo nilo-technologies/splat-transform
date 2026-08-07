@@ -142,6 +142,37 @@ describe('writeVoxel collisionMesh validation', function () {
     });
 });
 
+describe('writeVoxel autoRotate validation', function () {
+    const dummyCreateDevice = async () => ({});
+
+    /**
+     * Minimal table carrying every column writeVoxel requires.
+     *
+     * @returns {DataTable} One-row table.
+     */
+    function makeTable() {
+        const names = [
+            'x', 'y', 'z',
+            'rot_0', 'rot_1', 'rot_2', 'rot_3',
+            'scale_0', 'scale_1', 'scale_2',
+            'opacity'
+        ];
+        return new DataTable(names.map(name => new Column(name, new Float32Array(1))));
+    }
+
+    it('rejects a non-finite autoRotate angle', async function () {
+        await assert.rejects(
+            () => writeVoxel({
+                filename: 'scene.voxel.json',
+                dataTable: makeTable(),
+                createDevice: dummyCreateDevice,
+                autoRotate: NaN
+            }, new MemoryFileSystem()),
+            /autoRotate/
+        );
+    });
+});
+
 describe('resolveColorSmoothRadius', function () {
     it('denoises by default only when a palette is requested', function () {
         assert.strictEqual(resolveColorSmoothRadius(undefined, undefined), undefined,

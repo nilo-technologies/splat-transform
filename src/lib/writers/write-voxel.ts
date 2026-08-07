@@ -23,6 +23,7 @@ import {
     type NavSeed,
     voxelizeToBuffer
 } from '../voxel';
+import { applyAlignYaw, estimateAlignYaw } from '../voxel/align-yaw';
 import { SparseVoxelGrid } from '../voxel/sparse-voxel-grid';
 
 // Denoising radius, in voxels, used when a palette is requested and no explicit
@@ -110,6 +111,9 @@ type WriteVoxelOptions = {
 
     /** Voxel size in world units for the `.vox` model only, letting it stay inside the format's 256-per-axis limit while the octree and collision mesh keep a finer `voxelResolution`. Rounded to the nearest whole multiple of `voxelResolution`. Default: same as `voxelResolution`. */
     collisionVoxelsSize?: number;
+
+    /** Rotate the voxel grid to line up with the scene's dominant surfaces, cutting staircase voxels. `true` estimates the best yaw about Y; a number applies that yaw in degrees verbatim. The rotation is recorded in the `.voxel.json` metadata and as a `.collision.glb` node rotation, so those outputs still land on the unrotated splat; the `.vox` is written in the aligned frame. Default: false */
+    autoRotate?: boolean | number;
 };
 
 /**
@@ -396,7 +400,8 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         collisionColorSmooth,
         collisionColorCoherent,
         collisionVoxels,
-        collisionVoxelsSize
+        collisionVoxelsSize,
+        autoRotate = false
     } = options;
 
     if (!createDevice) {
@@ -420,6 +425,10 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
     if (collisionVoxelsSize !== undefined && !(collisionVoxelsSize >= voxelResolution)) {
         throw new Error(
             `collisionVoxelsSize must be >= voxelResolution (${voxelResolution}), got ${collisionVoxelsSize}`);
+    }
+
+    if (typeof autoRotate === 'number' && !Number.isFinite(autoRotate)) {
+        throw new Error(`autoRotate must be true, false or a finite angle in degrees, got ${autoRotate}`);
     }
 
     if (Array.isArray(collisionColorPalette)) {
@@ -465,7 +474,38 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
     if (missingColumns.length > 0) {
         throw new Error(`writeVoxel: missing required column(s): ${missingColumns.join(', ')}`);
     }
-    const delta = computeWriteTransform(dataTable.transform, Transform.IDENTITY);
+    const writeDelta = computeWriteTransform(dataTable.transform, Transform.IDENTITY);
+
+    let alignYaw = 0;
+    if (autoRotate !== false) {
+        if (typeof autoRotate === 'number') {
+            alignYaw = autoRotate;
+            if (alignYaw !== 0) {
+                logger.info(`auto-rotate: yaw ${alignYaw.toFixed(2)}deg (explicit)`);
+            }
+        } else {
+            const estimate = estimateAlignYaw(dataTable, { opacityCutoff });
+            alignYaw = estimate.yawDegrees;
+            if (estimate.reason) {
+                logger.info(`auto-rotate: no rotation applied - ${estimate.reason}`);
+            } else {
+                logger.info(`auto-rotate: yaw ${alignYaw.toFixed(2)}deg (est. ${(estimate.improvement * 100).toFixed(0)}% fewer surface voxels, ${fmtCount(estimate.votedCount)} of ${fmtCount(dataTable.numRows)} splats voted)`);
+            }
+            const bins = estimate.curve.length;
+            if (bins > 0) {
+                for (let deg = 0; deg < 90; deg += 5) {
+                    const idx = Math.min(bins - 1, Math.round(deg / 90 * bins));
+                    logger.debug(`auto-rotate cost at ${deg}deg: ${estimate.curve[idx].toFixed(3)}`);
+                }
+            }
+        }
+    }
+
+    const aligned = applyAlignYaw(writeDelta ?? new Transform(), navSeed, alignYaw);
+    const alignedSeed = aligned.navSeed;
+    const recordedRotation = aligned.recordedRotation;
+    const delta = aligned.delta;
+
     let cols: ReturnType<typeof transformColumns> | null = transformColumns(dataTable, voxelColumns, delta);
     let pcDataTable: DataTable | null = new DataTable(voxelColumns.map(name => new Column(name, cols!.get(name)!)));
 
@@ -564,7 +604,7 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
             const sub = logger.group('Fill exterior');
             const fillResult = await fillExterior(
                 grid, gridBounds, voxelResolution,
-                navExteriorRadius!, navSeed!,
+                navExteriorRadius!, alignedSeed!,
                 gpuDilation!
             );
             grid = fillResult.grid;
@@ -587,7 +627,7 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
             const navResult = await carve(
                 grid, gridBounds, voxelResolution,
                 navCapsule!.height, navCapsule!.radius,
-                navSeed!,
+                alignedSeed!,
                 gpuDilation!
             );
             grid = navResult.grid;
@@ -646,7 +686,8 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
 
         const glbBytes = collisionMeshShape ?
             buildCollisionMesh(grid, gridBounds, voxelResolution, collisionMeshShape,
-                coloredCollisionMesh ? { ...splatColors!, flatShade: collisionColorFlat } : null) :
+                coloredCollisionMesh ? { ...splatColors!, flatShade: collisionColorFlat } : null,
+                { nodeRotation: recordedRotation }) :
             null;
 
         let voxBytes: Uint8Array | null = null;
@@ -672,7 +713,7 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         logger.info(`mixed leaves: ${fmtCount(octree.numMixedLeaves)}`);
 
         const writingSub = logger.group('Writing');
-        await writeOctreeFiles(fs, filename, octree);
+        await writeOctreeFiles(fs, filename, octree, recordedRotation);
 
         if (glbBytes) {
             const glbFilename = filename.replace('.voxel.json', '.collision.glb');
