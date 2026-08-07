@@ -1,6 +1,7 @@
 import { Quat, Vec3 } from 'playcanvas';
 
 import type { DataTable } from '../data-table';
+import { Transform } from '../utils';
 
 /** Axis the alignment yaw rotates about. */
 type UpAxis = 'x' | 'y' | 'z';
@@ -251,4 +252,80 @@ const estimateAlignYaw = (dataTable: DataTable, options: AlignYawOptions = {}): 
     return { yawDegrees, improvement, cost0, costBest, votedCount, totalWeight, curve };
 };
 
-export { estimateAlignYaw, type AlignYawOptions, type AlignYawResult, type UpAxis };
+/**
+ * Result of {@link applyAlignYaw}.
+ */
+type AlignYawApplied = {
+    /** Write transform with the alignment yaw composed in. */
+    delta: Transform;
+    /** Seed position rotated into the aligned voxel frame, when one was given. */
+    navSeed?: { x: number; y: number; z: number };
+    /** Rotation mapping the voxel frame back to source space as `[x, y, z, w]`, or null at zero yaw. */
+    recordedRotation: [number, number, number, number] | null;
+};
+
+const EULERS: Record<UpAxis, (deg: number) => [number, number, number]> = {
+    x: deg => [deg, 0, 0],
+    y: deg => [0, deg, 0],
+    z: deg => [0, 0, deg]
+};
+
+/**
+ * Composes an alignment yaw into a write transform, rotating any seed position
+ * with it and producing the rotation that maps the aligned frame back to source
+ * space for the output metadata.
+ *
+ * @param delta - Write transform the yaw is applied on top of.
+ * @param navSeed - Seed position in source space, if any.
+ * @param yawDegrees - Yaw to apply about `up`, in degrees.
+ * @param up - Axis the yaw rotates about. Default: `'y'`
+ * @returns The composed transform, the rotated seed and the rotation to record.
+ * At zero yaw the inputs pass through untouched and `recordedRotation` is null.
+ * @throws If `yawDegrees` is not finite or `up` is not an axis.
+ */
+const applyAlignYaw = (
+    delta: Transform,
+    navSeed: { x: number; y: number; z: number } | undefined,
+    yawDegrees: number,
+    up: UpAxis = 'y'
+): AlignYawApplied => {
+    if (!Number.isFinite(yawDegrees)) {
+        throw new Error(`applyAlignYaw: yawDegrees must be finite, got ${yawDegrees}`);
+    }
+    if (!EULERS[up]) {
+        throw new Error(`applyAlignYaw: invalid up axis '${up}', expected 'x', 'y' or 'z'`);
+    }
+    if (yawDegrees === 0) {
+        return { delta, navSeed, recordedRotation: null };
+    }
+
+    const [ex, ey, ez] = EULERS[up](yawDegrees);
+    const yaw = new Transform().fromEulers(ex, ey, ez);
+
+    // Read everything off `yaw` before `.mul`, which mutates the receiver
+    // (src/lib/utils/math.ts:135-137).
+    let rotatedSeed = navSeed;
+    if (navSeed) {
+        const p = new Vec3(navSeed.x, navSeed.y, navSeed.z);
+        yaw.rotation.transformVector(p, p);
+        rotatedSeed = { x: p.x, y: p.y, z: p.z };
+    }
+    const inverse = yaw.rotation.clone().invert();
+
+    return {
+        // Same ordering as the rotate process action (src/lib/process.ts:388):
+        // the yaw applies after delta.
+        delta: yaw.mul(delta),
+        navSeed: rotatedSeed,
+        recordedRotation: [inverse.x, inverse.y, inverse.z, inverse.w]
+    };
+};
+
+export {
+    estimateAlignYaw,
+    applyAlignYaw,
+    type AlignYawOptions,
+    type AlignYawResult,
+    type AlignYawApplied,
+    type UpAxis
+};

@@ -8,7 +8,7 @@ import { describe, it } from 'node:test';
 import { Quat, Vec3 } from 'playcanvas';
 
 import { Column, DataTable } from '../src/lib/index.js';
-import { estimateAlignYaw } from '../src/lib/voxel/align-yaw.js';
+import { applyAlignYaw, estimateAlignYaw } from '../src/lib/voxel/align-yaw.js';
 import { Transform } from '../src/lib/utils/index.js';
 
 const COLUMN_NAMES = [
@@ -234,5 +234,55 @@ describe('estimateAlignYaw', function () {
         table.removeColumn('opacity');
 
         assert.throws(() => estimateAlignYaw(table), /missing required column 'opacity'/);
+    });
+});
+
+describe('applyAlignYaw', function () {
+    it('is a no-op at zero yaw and records nothing', function () {
+        const delta = new Transform();
+
+        const result = applyAlignYaw(delta, { x: 1, y: 2, z: 3 }, 0);
+
+        assert.strictEqual(result.recordedRotation, null);
+        assert.deepStrictEqual(result.navSeed, { x: 1, y: 2, z: 3 });
+        assert.ok(result.delta.isIdentity());
+    });
+
+    it('rotates the nav seed into the voxel frame', function () {
+        // R_y(90) maps (1, 0, 0) to (0, 0, -1).
+        const result = applyAlignYaw(new Transform(), { x: 1, y: 0, z: 0 }, 90);
+
+        assert.ok(Math.abs(result.navSeed.x) < 1e-6, `x was ${result.navSeed.x}`);
+        assert.ok(Math.abs(result.navSeed.y) < 1e-6, `y was ${result.navSeed.y}`);
+        assert.ok(Math.abs(result.navSeed.z + 1) < 1e-6, `z was ${result.navSeed.z}`);
+    });
+
+    it('records the rotation that maps the voxel frame back to source', function () {
+        const yaw = 30;
+
+        const result = applyAlignYaw(new Transform(), undefined, yaw);
+
+        const [x, y, z, w] = result.recordedRotation;
+        const point = new Vec3(1, 0, 0);
+        new Quat().setFromEulerAngles(0, yaw, 0).transformVector(point, point);
+        new Quat(x, y, z, w).transformVector(point, point);
+        assert.ok(Math.abs(point.x - 1) < 1e-6 && Math.abs(point.z) < 1e-6,
+            `round trip failed: ${point.x}, ${point.y}, ${point.z}`);
+        assert.strictEqual(result.navSeed, undefined);
+    });
+
+    it('composes the yaw on top of an existing delta', function () {
+        const result = applyAlignYaw(new Transform().fromEulers(0, 10, 0), undefined, 20);
+
+        const point = new Vec3(1, 0, 0);
+        result.delta.transformPoint(point, point);
+        const expected = new Vec3(1, 0, 0);
+        new Quat().setFromEulerAngles(0, 30, 0).transformVector(expected, expected);
+        assert.ok(Math.abs(point.x - expected.x) < 1e-5 && Math.abs(point.z - expected.z) < 1e-5,
+            `expected the yaws to add: got ${point.x}, ${point.z}`);
+    });
+
+    it('rejects a non-finite yaw', function () {
+        assert.throws(() => applyAlignYaw(new Transform(), undefined, NaN), /finite/);
     });
 });
