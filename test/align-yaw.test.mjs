@@ -9,6 +9,7 @@ import { Quat, Vec3 } from 'playcanvas';
 
 import { Column, DataTable } from '../src/lib/index.js';
 import { estimateAlignYaw } from '../src/lib/voxel/align-yaw.js';
+import { Transform } from '../src/lib/utils/index.js';
 
 const COLUMN_NAMES = [
     'x', 'y', 'z',
@@ -171,5 +172,67 @@ describe('estimateAlignYaw', function () {
         assert.ok(Number.isFinite(result.costBest));
         // Ceiling for this fixture is ~0.19915 (see Task 1); leave margin below it.
         assert.ok(result.improvement > 0.19);
+    });
+
+    it('returns a yaw in output space when the table carries a transform', function () {
+        // Transform.PLY rolls 180 degrees about Z. Every wall here has zero
+        // local Y (rotation is about Y only, starting from local +X), so its
+        // normal always lies in the XZ plane - the very plane that contains
+        // Z, the roll axis. A rotation restricted to a plane that contains
+        // its own axis degenerates to a 1-D reflection of the in-plane axis
+        // (x -> -x, z unchanged; verified numerically: applying the PLY
+        // rotation to each wall's raw normal exactly negates atan2(x, z)).
+        // Reusing the identity table's raw columns under Transform.PLY
+        // therefore does *not* describe the same output-space geometry - it
+        // describes its mirror image, so the two optimal yaws are negatives
+        // of each other, not equal. This was confirmed against an
+        // implementation-independent brute-force search over theta using
+        // gridCost directly on both phi sets: true argmin is -17deg for the
+        // identity phis and +17deg for the PLY-mirrored phis, matching the
+        // estimator exactly. A real order-of-composition bug (preRotation
+        // applied before the gaussian's own quaternion) would instead shift
+        // phi by 180deg - an exact multiple of this algorithm's 90deg period
+        // - leaving withTransform's yaw equal to plain's rather than its
+        // negation, which the sum-based check below would catch.
+        const identity = makeWalls([17, 107, 197, 287]);
+        const transformed = new DataTable(
+            COLUMN_NAMES.map(name => new Column(name, identity.getColumnByName(name).data.slice())),
+            Transform.PLY.clone()
+        );
+
+        const plain = estimateAlignYaw(identity);
+        const withTransform = estimateAlignYaw(transformed);
+
+        const delta = Math.abs(plain.yawDegrees + withTransform.yawDegrees) % 90;
+        assert.ok(Math.min(delta, 90 - delta) < 0.5,
+            `expected mirrored yaws, got ${plain.yawDegrees} and ${withTransform.yawDegrees}`);
+        assert.strictEqual(withTransform.reason, undefined);
+    });
+
+    it('supports rotating about another up axis', function () {
+        const table = makeWalls([17, 107, 197, 287]);
+
+        const aboutY = estimateAlignYaw(table, { up: 'y' });
+        const aboutZ = estimateAlignYaw(table, { up: 'z' });
+
+        // These normals lie in the XZ plane, so a Y-up search sees them fully
+        // while a Z-up search sees them partly edge-on. Ceiling for this
+        // fixture is ~0.19915 (see Task 1); leave margin below it.
+        assert.ok(aboutY.improvement > 0.19);
+        assert.ok(aboutZ.improvement <= aboutY.improvement + 1e-9);
+    });
+
+    it('rejects an invalid up axis and a nonsense step', function () {
+        const table = makeWalls([0, 90]);
+
+        assert.throws(() => estimateAlignYaw(table, { up: 'w' }), /invalid up axis/);
+        assert.throws(() => estimateAlignYaw(table, { stepDegrees: 0 }), /stepDegrees/);
+    });
+
+    it('throws when a required column is missing', function () {
+        const table = makeWalls([0, 90]);
+        table.removeColumn('opacity');
+
+        assert.throws(() => estimateAlignYaw(table), /missing required column 'opacity'/);
     });
 });
