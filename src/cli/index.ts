@@ -152,6 +152,7 @@ const cliOptionsConfig = {
     'collision-color-coherent': { type: 'string' },
     'collision-voxels': { type: 'string' },
     'collision-voxels-size': { type: 'string' },
+    'auto-rotate': { type: 'string' },
     'projection': { type: 'string' },
     'camera': { type: 'string' },
     'look-at': { type: 'string' },
@@ -209,7 +210,8 @@ const optionalValueOptions: Map<string, OptionalValueValidator> = new Map([
     ['--voxel-carve', isNumericValue],
     ['--voxel-params', isNumericValue],
     ['--collision-mesh', isCollisionMeshShape],
-    ['-K', isCollisionMeshShape]
+    ['-K', isCollisionMeshShape],
+    ['--auto-rotate', isNumericValue]
 ]);
 
 const shortToLong = new Map<string, string>(
@@ -441,6 +443,11 @@ const parseArguments = async () => {
         }
     }
 
+    let autoRotate: boolean | number = false;
+    if (v['auto-rotate'] !== undefined) {
+        autoRotate = v['auto-rotate'] === '' ? true : parseNumber(v['auto-rotate']);
+    }
+
     // The colour options feed the .vox as well as the coloured mesh shapes, so
     // they only go unused when neither is requested.
     const coloredMesh = collisionMesh === 'voxel' || collisionMesh === 'tris';
@@ -605,6 +612,7 @@ const parseArguments = async () => {
         collisionColorCoherent,
         collisionVoxels,
         collisionVoxelsSize,
+        autoRotate,
         renderProjection,
         renderCameraPosition,
         renderLookAt,
@@ -908,6 +916,10 @@ VOXEL OUTPUT (.voxel.json)
         --collision-color-coherent  <r>   Snap each vertex to the dominant palette colour within r voxels, removing speckle. Default: off
         --collision-voxels  <file.vox>    Also write the collision voxels as a MagicaVoxel .vox model, coloured per voxel from the splats. Default: off
         --collision-voxels-size <size>    Voxel size for the .vox only, leaving the octree and collision mesh finer. Regions over 256 voxels/axis are tiled into several models automatically, so this is for keeping model count and file size sensible. Default: --voxel-params size
+        --auto-rotate      [degrees]        Rotate the voxel grid to line up with the scene's dominant surfaces, cutting
+                                            staircase voxels. Bare flag estimates the yaw; a number applies it verbatim.
+                                            The .voxel.json and .collision.glb record the rotation so they still match the
+                                            unrotated splat; the .vox is written aligned. Default: off
 
 IMAGE OUTPUT (.webp) — lossless WebP rendered via GPU rasterizer
         --projection       <pinhole|equirect>  Camera projection. Default: pinhole.
@@ -1162,6 +1174,10 @@ const main = async () => {
                 }
             }
         }
+    }
+
+    if (options.autoRotate !== false && outputFormat !== 'voxel') {
+        logger.warn('--auto-rotate has no effect without a .voxel.json output.');
     }
 
     try {

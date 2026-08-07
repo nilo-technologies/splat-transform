@@ -453,4 +453,41 @@ describe('CLI parsing', () => {
 
         assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
     });
+
+    it('accepts a bare --auto-rotate without swallowing the output argument', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--auto-rotate',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+    });
+
+    it('accepts an explicit --auto-rotate angle', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--auto-rotate',
+            '12.5',
+            'null'
+        ]);
+
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+    });
+
+    it('rejects a non-numeric --auto-rotate value', async () => {
+        const result = await runCli([
+            '--gpu',
+            'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--auto-rotate=banana',
+            'null'
+        ]);
+
+        assert.notStrictEqual(result.code, 0, 'CLI should reject a non-numeric angle');
+    });
 });

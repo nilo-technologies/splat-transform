@@ -98,6 +98,9 @@ type Options = {
     /** Voxel size in world units for the `.vox` model only, letting it stay inside the format's 256-per-axis limit while the octree and collision mesh keep the finer `--voxel-params` size. Rounded to the nearest whole multiple of the collision voxel size. */
     collisionVoxelsSize?: number;
 
+    /** Rotate the voxel grid to line up with the scene's dominant surfaces, cutting staircase voxels. `true` estimates the yaw; a number applies that yaw in degrees. Recorded in the `.voxel.json` metadata and the `.collision.glb` node so both still match the unrotated splat; the `.vox` is written aligned. */
+    autoRotate?: boolean | number;
+
     /** Camera projection for image output: `'pinhole'` (default) or `'equirect'` (360°×180° panorama). */
     renderProjection?: 'pinhole' | 'equirect';
 
