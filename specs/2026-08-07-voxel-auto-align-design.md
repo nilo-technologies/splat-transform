@@ -352,55 +352,184 @@ comparing exact `.vox` occupied-voxel counts:
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | occupied voxels | 2055 | 2036 | 2019 | **2017** | 2031 | 2050 | 2049 |
 
-The true minimum sits at 0deg, matching the unguarded estimate of 1.67deg to
-well within "a few degrees" — **confirmed**, not contradicted. Given how flat
-this curve is (all four real scenes are near-aligned), this sweep alone is a
-weak test of the sign convention, so the same sweep was repeated on the
-synthetic `+20deg`-rotated `dungeons-3.ply` from Step 1, which has a real,
-sizeable misalignment to find:
+At this 10-degree granularity the minimum sits at 0deg, matching the
+unguarded estimate of 1.67deg to well within "a few degrees." Given how flat
+this curve is, this sweep alone is a weak test of the sign convention, so the
+same sweep was repeated on the synthetic `+20deg`-rotated `dungeons-3.ply`
+from Step 1, which has a real, sizeable misalignment to find:
 
 | yaw (deg) | -30 | -20 | -18.33 (estimate) | -10 | 0 | 10 | 20 | 30 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | occupied voxels | 2019 | **2017** | 2021 | 2031 | 2050 | 2049 | 2075 | 2082 |
 
-The true minimum sits at -20deg, 1.67deg from the estimator's -18.33deg pick
-(the same residual as above — it is `dungeons-3.ply`'s own inherent tilt,
-correctly not fully cancelled) and well inside the "confirmed" band. This is
-the stronger of the two sweeps: it demonstrates the proxy ranks angles
-correctly on a genuine, real-geometry misalignment, not just on near-flat data.
-**Confirmed.**
+At 10-degree granularity this also looks clean: 0deg (2050) is clearly the
+worst point, and the minimum sampled (-20deg, 2017) sits 1.67deg from the
+estimate.
+
+**A second round of review flagged that `house.ply`/`industrial.ply`'s "tiny
+misalignment" claim rested only on the estimator's own cost curve, not an
+independent sweep — a partial circularity, since the metric under test would
+be validating itself.** Investigating that gap uncovered something more
+consequential than a missing data point for two scenes: **the sweep
+methodology itself has a real, reproducible noise floor**, found by filling in
+finer angle steps (1-2deg) around zero on top of the two coarse sweeps above.
+
+`house.ply` swept the same way, plus 1-2-degree steps out to +/-10:
+
+| yaw (deg) | -30 | -20 | -10 | -7 | -6 | -5 | -4 | -3 | -2 | -1 | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 10 | 20 | 30 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| occupied voxels | 4668 | 4627 | 4583 | 4544 | 4579 | 4600 | 4614 | 4570 | 4494 | 4416 | **4382** | 4415 | 4490 | 4542 | 4565 | 4546 | 4527 | 4533 | 4576 | 4630 | 4705 |
+
+This one holds up: 0deg is an unambiguous global minimum across all 21
+sampled points (next closest, +/-1deg, is 33-34 voxels / 0.75% higher), even
+though the 4-7deg region on both sides wobbles non-monotonically — that wobble
+is the same noise found below, just not near enough to zero to threaten the
+conclusion. **`house.ply` is independently confirmed**, matching its 0.19deg
+unguarded estimate.
+
+Filling in the same 1-2deg steps around zero for real (unrotated)
+`dungeons-3.ply` tells a different story:
+
+| yaw (deg) | -10 | -5 | -2 | -1 | 0 | 1 | 2 | 5 | 10 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| occupied voxels | 2019 | 2019 | 2006 | 1999 | 2017 | 2013 | 2030 | **1995** | 2031 |
+
+The finer-grained global minimum among these points is +5deg (1995), not
+0deg — lower than the value the original coarse sweep reported as "the"
+minimum. The swing across this narrow band (1995-2030, ~1.7%) is comparable
+to the scene's own predicted improvement (0.18%). The 10-degree sweep's
+"confirmed" verdict above should be read as *consistent with* a small true
+misalignment (the region far from zero is not favoured), not as a sharp,
+degree-precise confirmation — the noise floor and the signal are the same
+size here.
+
+And filling in the same steps around the synthetic `+20deg`-rotated scene's
+predicted -18.33deg optimum:
+
+| yaw (deg) | -25 | -22 | -20 | -18.33 | -16 | -14 | -10 | -5 | 0 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| occupied voxels | 2019 | 2006 | 2017 | 2021 | 2024 | **1978** | 2031 | 2011 | 2050 |
+
+Same pattern: the finer-grained minimum (-14deg, 1978) doesn't land on -20deg
+or -18.33deg either. What *does* hold up robustly is the big picture: 0deg
+(2050) is unambiguously worse than every sampled point from -25deg to -10deg
+(1978-2031), a genuine ~3.5% swing in the predicted direction. That's a real,
+useful confirmation of *sign and rough scale*, not of *exact-degree
+precision* — the same caveat as the real `dungeons-3.ply` sweep, just with a
+large-enough signal that the directional conclusion survives the noise.
+
+Attempting the same investigation on `industrial.ply` (both the brief's
+7-point sweep and a finer set) makes the noise floor obvious rather than
+subtle:
+
+| yaw (deg) | -30 | -20 | -15 | -10 | -5 | -2 | -1 | -0.5 | -0.1 | 0 | 0.1 | 0.5 | 1 | 2 | 5 | 10 | 15 | 20 | 30 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| occupied voxels | 1657 | 1625 | 1623 | 1609 | 1576 | 1624 | 1665 | 1687 | 1702 | **1704** | 1705 | 1707 | 1684 | 1625 | 1578 | 1619 | 1622 | 1628 | 1659 |
+
+0deg is a local *maximum* here, not a minimum — higher than every neighbour
+out to +/-10deg — before the curve settles into a broad, roughly symmetric
+plateau around 1610-1660 further out. There's no discontinuity right at zero
+(0.1deg and 0.5deg sit smoothly between 0deg and 1deg, ruling out a code-path
+artifact from `autoRotate: 0` skipping the rotation pipeline entirely — see
+below), so this is a real, continuous, reproducible response, not noise from
+non-determinism (re-running 0deg and -10deg twice each gave identical counts).
+The swing (1576-1707, ~7.6%) dwarfs the scene's own predicted improvement
+(0.0015%). **`industrial.ply`'s sweep does not confirm the near-zero
+estimate — it's inconclusive**, not contradictory (the response is
+essentially symmetric in sign, which is at least consistent with no strongly
+preferred nonzero direction). Its "tiny misalignment" claim continues to rest
+on the estimator's own smooth cost curve alone.
+
+**Root cause (most likely), not chased further given the answer doesn't
+change the outcome:** `--auto-rotate=N` for any `N != 0` (even 0.1deg) always
+routes through the full rotate-then-recrop pipeline, re-deriving the grid's
+AABB in the rotated frame before voxelizing; `--auto-rotate=0` (or no flag)
+skips rotation and alignment entirely, per the documented `autoRotate: 0`
+contract (a direct `cmp` of `industrial.ply`'s `--auto-rotate=0` output
+against its no-flag baseline confirmed byte-identical output).
+Because a voxel grid is quantized, even a fractional-degree rotation shifts
+which voxels sub-pixel-scale surface detail falls into, independent of any
+real macroscopic alignment change — a form of spatial aliasing. This noise
+is on the order of 1.5-8% of occupied-voxel count at this resolution
+(`--voxel-params 0.05`), scene-dependent, and is comparable to or larger than
+the true signal for every real scene here except `house.ply`. It was
+continuous through zero in every case checked (no jump), so it is not the
+`autoRotate: 0` code-path branch itself causing a discontinuity — it's an
+inherent property of quantized voxelization responding to small rotations,
+which the `autoRotate: 0` special case merely sits inside of like any other
+sample point.
 
 #### Guard calibration
 
-`minImprovement` (default 0.02) **held; not changed.** Evidence for keeping it:
+`minImprovement` (default 0.02) **held; not changed.** Evidence for keeping
+it, now weighted by how much independent confirmation each scene actually has:
 
-- No real scene with obvious man-made structure was incorrectly rejected: all
-  three (`house.ply`, `industrial.ply`, `dungeons-3.ply`) have genuinely tiny
-  misalignment (0.19deg, -0.13deg, 1.67deg), so a near-zero predicted
-  improvement is the *correct* answer, not evidence the guard is too strict.
-- `landscape.spz` (organic terrain) tripped the guard and stayed at 0 degrees,
-  exactly as predicted in the "Validation experiment" section above.
-- The synthetic +20deg misalignment produced 7.94% predicted improvement,
-  comfortably clear of the 2% threshold, so the guard does not swallow a real
-  yaw problem either. This is consistent with Task 1's synthetic-Gaussian
-  finding (a 17deg tilt producing ~19.9% improvement).
+- **Independently confirmed by a clean sweep:** `house.ply` (0.19deg
+  estimate; unambiguous global minimum at 0deg across 21 points, both coarse
+  and fine). The synthetic `+20deg` misalignment is confirmed for *direction
+  and rough scale* (0deg is unambiguously worst; the -25..-10deg region is
+  consistently 0.9-3.5% better) but not for exact-degree precision, since the
+  finer-grained minimum landed at -14deg rather than -18.33/-20deg.
+- **Consistent with, but not sharply confirmed by, an independent sweep:**
+  real `dungeons-3.ply` (1.67deg estimate). The 10-degree sweep's minimum
+  landed at 0deg; a finer sweep's minimum landed at +5deg instead. Both are
+  within the scene's own noise floor (~1.7%, comparable to its 0.18%
+  predicted improvement), so the honest reading is "no evidence of a
+  larger hidden misalignment," not "the estimate is confirmed to the
+  degree."
+- **Not independently confirmed; rests on the estimator's own cost curve
+  alone:** `industrial.ply` (-0.13deg estimate) — its sweep is dominated by
+  a 7.6% noise floor roughly 5000x its 0.0015% predicted improvement, and
+  does not resolve to a clear minimum anywhere. `landscape.spz` was never
+  swept in this experiment at all (the guard fired; only its own cost curve
+  was inspected, at 5-degree steps via `--verbose`).
+- The synthetic +20deg misalignment's 7.94% predicted improvement (from the
+  estimator's own cost units, independent of the sweep) is comfortably clear
+  of the 2% threshold, and Task 1's synthetic-Gaussian finding (17deg tilt to
+  ~19.9% improvement, per that task's brief) points the same direction: a
+  guard set at 2% does not swallow a real, sizeable yaw problem.
 
 No scene in this experiment falls near the 2% boundary, so this run cannot
 distinguish "0.02 is exactly right" from "0.02 is roughly right"; it only
-rules out "0.02 is badly miscalibrated" in either direction.
+rules out "0.02 is badly miscalibrated" in either direction. The discovery of
+a ~1.5-8% sweep noise floor is, if anything, a point in favour of keeping a
+conservative guard rather than lowering it: below roughly that magnitude of
+predicted improvement, a single real voxelization pass at typical CLI
+resolutions cannot reliably measure whether rotating actually helped, so a
+guard that declines to act on smaller predictions is declining to act on
+signals the pipeline can't itself verify anyway.
 
 #### Deviation and a bug found
 
 `landscape.spz` with the brief's literal `--voxel-params 0.05,0.1` crashes
-during the filtering stage, with or without `--auto-rotate` (so this is
-unrelated to this feature):
+during the filtering stage. This was directly confirmed both **without**
+`--auto-rotate` and **with** it — not inferred from the non-crashing
+`2.0,0.1` run used elsewhere in this report:
 
 ```
+$ node bin/cli.mjs .../landscape.spz --collision-voxels ./scenes/tmp-landscape-base.vox \
+    --voxel-params 0.05,0.1 -w ./scenes/tmp-landscape-base.voxel.json
+...
 ✗ RangeError: Invalid typed array length: -2147483648
     at new Float64Array (<anonymous>)
     at new IntKeyMap (.../dist/cli.mjs:46964:21)
     at filterAndFillBlocks (.../dist/cli.mjs:68677:22)
+
+$ node bin/cli.mjs .../landscape.spz --auto-rotate --collision-voxels ./scenes/tmp-landscape-crash-check.vox \
+    --voxel-params 0.05,0.1 -w ./scenes/tmp-landscape-crash-check.voxel.json
+...
+  · auto-rotate: no rotation applied - no dominant alignment: best yaw saves 0.1%, below the 2.0% threshold
+  ▸ Build voxels
+    ...
+      ✗ RangeError: Invalid typed array length: -2147483648
+    at new Float64Array (<anonymous>)
+    at new IntKeyMap (.../dist/cli.mjs:46964:21)
+    at filterAndFillBlocks (.../dist/cli.mjs:68677:22)
 ```
+
+Identical crash, same stack, in both cases — `--auto-rotate` logs its (correct,
+guard-fired) decision before the crash, since the crash is in the filtering
+stage that runs after alignment regardless of which yaw was chosen.
 
 `landscape.spz`'s scene extents are roughly 593 × 370 × 882 units — two to
 three orders of magnitude larger than `house.ply`/`industrial.ply`/
