@@ -602,7 +602,7 @@ Add `import { Transform } from '../src/lib/utils/index.js';` to the imports, the
 
         const delta = Math.abs(plain.yawDegrees + withTransform.yawDegrees) % 90;
         assert.ok(Math.min(delta, 90 - delta) < 0.5,
-            `expected matching yaws, got ${plain.yawDegrees} and ${withTransform.yawDegrees}`);
+            `expected mirrored yaws, got ${plain.yawDegrees} and ${withTransform.yawDegrees}`);
         assert.strictEqual(withTransform.reason, undefined);
     });
 
@@ -638,9 +638,13 @@ Add `import { Transform } from '../src/lib/utils/index.js';` to the imports, the
 
 Run: `node --import tsx --test test/align-yaw.test.mjs`
 
-Expected: PASS, all ten cases.
-
-If the transform case fails, the bug is the order in which `preRotation` is applied to `n`: it must be applied *after* the gaussian's own quaternion, matching `_q.set(...).mul2(r, _q)` at `src/lib/data-table/transform.ts:110`.
+Expected: PASS, all ten cases. The transform-space case checks that the two
+yaws are mirrored (sum, not difference, near 0 mod 90) — see the comment on
+the test itself for why. If it fails, do not assume an ordering bug in
+`preRotation`/`q` without first re-deriving the expected relationship for
+whatever fixture is in play; that composition order was independently
+verified twice (fresh script plus deliberate bug injection) during the
+original implementation of this task.
 
 - [ ] **Step 3: Commit**
 
