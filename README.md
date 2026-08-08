@@ -261,6 +261,23 @@ Apply when writing `.voxel.json` (sparse voxel octree for collision detection). 
                                           fitting the axis limit. Must be >= --voxel-params size and is
                                           rounded to a whole multiple of it.
                                           Default: same as --voxel-params size
+    --auto-rotate      [degrees]        Rotate the voxel grid to line up with the scene's dominant surfaces
+                                          before voxelizing, cutting staircase voxels. Bare flag estimates the
+                                          best yaw (about Y) from the splats' own surface normals; a number
+                                          applies that yaw verbatim, skipping estimation.
+                                          Default: off
+```
+
+`--auto-rotate` yaws the whole voxel grid — octree, `.collision.glb`, and `.vox` alike — before voxelizing, which turns a diagonal wall from a staircase of extra voxels into flat, efficient faces. A bare flag estimates the yaw by having each Gaussian vote for the orientation of its flattest axis, weighted by how flat, large, and opaque it is; if nothing wins clearly it skips rotation entirely and says why in the log line, rather than applying a meaningless angle to an organic scene.
+
+The `.voxel.json` metadata and `.collision.glb` node both record the rotation that was applied, so they still line up with the original, unrotated splat when loaded. The `.vox` is written in the aligned frame with no rotation recorded — MagicaVoxel cannot express an arbitrary yaw, and an aligned model is the entire point of the flag.
+
+```bash
+# Estimate the best yaw automatically
+splat-transform building.ply building.voxel.json --auto-rotate
+
+# Apply a known 15 degree yaw directly, skipping estimation
+splat-transform building.ply building.voxel.json --auto-rotate 15
 ```
 
 The two spatial options are independent: `--collision-color-smooth` cleans the colors *before* the palette is built, `--collision-color-coherent` cleans the assignment *after*. Radii are in voxels, so they scale with `--voxel-params` size.
@@ -529,6 +546,9 @@ splat-transform --collision-color solid --collision-color-palette 24 \
 splat-transform --voxel-params 0.02,0.1 --collision-color-palette 24 \
     --collision-voxels output.vox --collision-voxels-size 0.2 \
     input.ply output.voxel.json
+
+# Rotate the voxel grid to line up with the scene before voxelizing
+splat-transform --auto-rotate --collision-voxels output.vox input.ply output.voxel.json
 ```
 
 ### Image Rendering
@@ -640,6 +660,7 @@ import {
 | `buildCollisionVox` | Encode a grid as a MagicaVoxel `.vox`, colours sampled from the splats |
 | `buildCollisionMesh` | Extract a collision mesh from a grid and encode it as GLB |
 | `buildSparseOctree` | Build the sparse voxel octree `writeVoxel` serialises |
+| `estimateAlignYaw`, `applyAlignYaw` | Estimate and apply the yaw `writeVoxel`'s `autoRotate` option uses to align the voxel grid |
 | `voxelFaces`, `marchingCubes` | Mesh extraction from a grid |
 | `GaussianBVH`, `computeGaussianExtents` | Build the colour source the above need |
 
@@ -808,6 +829,45 @@ forEachExposedFace(grid, (x, y, z, bucket) => faces++);  // bucket: 0..5 = -X,+X
 
 grid.forEachOccupiedVoxel((x, y, z) => { /* ... */ });
 ```
+
+### Auto-Rotate (Voxel Grid Alignment)
+
+The easiest way to use `--auto-rotate` programmatically is the same option `writeVoxel` exposes to the CLI — pass `autoRotate: true` (estimate the best yaw) or a number (apply that yaw in degrees, skipping estimation):
+
+```typescript
+import { writeVoxel, MemoryFileSystem } from '@playcanvas/splat-transform';
+
+const fs = new MemoryFileSystem();
+await writeVoxel({
+    filename: 'building.voxel.json',
+    dataTable: myDataTable,
+    autoRotate: true,                      // or e.g. 15 to apply a known yaw directly
+    collisionMesh: true,
+    createDevice: async () => myGraphicsDevice
+}, fs);
+```
+
+For finer control — inspecting the cost curve, overriding the up axis, or applying the rotation to a `DataTable` outside `writeVoxel`'s own pipeline — call the estimator and its transform helper directly:
+
+```typescript
+import { estimateAlignYaw, applyAlignYaw } from '@playcanvas/splat-transform';
+import { Transform } from '@playcanvas/splat-transform';
+
+const result = estimateAlignYaw(myDataTable); // options: { up, stepDegrees, minImprovement, opacityCutoff }
+
+if (result.reason) {
+    console.log(`no rotation applied: ${result.reason}`);
+} else {
+    console.log(`yaw ${result.yawDegrees.toFixed(2)} saves ~${(result.improvement * 100).toFixed(0)}%`);
+
+    // Compose the yaw into a write transform (and rotate a nav seed alongside it, if any):
+    const { delta, navSeed, recordedRotation } = applyAlignYaw(new Transform(), mySeed, result.yawDegrees);
+    // `recordedRotation` ([x, y, z, w]) maps the aligned frame back to source space -
+    // record it wherever your own pipeline needs to undo the rotation later.
+}
+```
+
+`estimateAlignYaw` only reads the `DataTable`'s rotation, scale, and opacity columns plus its `transform` — no GPU, no file I/O — so it runs anywhere the library does, including the browser.
 
 ### Custom Logging
 
