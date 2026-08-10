@@ -190,6 +190,8 @@ const writeFile = async (writeOptions: WriteOptions, fs: FileSystem) => {
                 collisionVoxels: options.collisionVoxels,
                 collisionVoxelsSize: options.collisionVoxelsSize,
                 autoRotate: options.autoRotate,
+                voxelCleanup: options.voxelCleanup,
+                voxelCleanupFill: options.voxelCleanupFill,
                 createDevice
             }, fs);
             break;

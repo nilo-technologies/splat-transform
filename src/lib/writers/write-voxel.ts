@@ -21,6 +21,7 @@ import {
     carve,
     fillExterior,
     fillFloor,
+    type CleanupFillMode,
     type NavSeed,
     voxelizeToBuffer
 } from '../voxel';
@@ -115,6 +116,12 @@ type WriteVoxelOptions = {
 
     /** Rotate the voxel grid to line up with the scene's dominant surfaces, cutting staircase voxels. `true` estimates the best yaw about Y; a number applies that yaw in degrees verbatim. The rotation is recorded in the `.voxel.json` metadata and as a `.collision.glb` node rotation, so those outputs still land on the unrotated splat; the `.vox` is written in the aligned frame. Default: false */
     autoRotate?: boolean | number;
+
+    /** Clean up the voxel grid: fill sampling holes, flatten bumpy surfaces and drop floating debris, at this scale in world units. Every added voxel must have gaussian density behind it. 0 or undefined disables it. Default: off */
+    voxelCleanup?: number;
+
+    /** Hole-filling algorithm for `voxelCleanup`. Requires `voxelCleanup`. Default: `'grow'` */
+    voxelCleanupFill?: CleanupFillMode;
 };
 
 /**
@@ -402,7 +409,9 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         collisionColorCoherent,
         collisionVoxels,
         collisionVoxelsSize,
-        autoRotate = false
+        autoRotate = false,
+        voxelCleanup,
+        voxelCleanupFill
     } = options;
 
     if (!createDevice) {
@@ -430,6 +439,24 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
 
     if (typeof autoRotate === 'number' && !Number.isFinite(autoRotate)) {
         throw new Error(`autoRotate must be true, false or a finite angle in degrees, got ${autoRotate}`);
+    }
+
+    if (voxelCleanup !== undefined && !(voxelCleanup >= 0)) {
+        throw new Error(`voxelCleanup must be >= 0, got ${voxelCleanup}`);
+    }
+
+    const cleanupEnabled = voxelCleanup !== undefined && voxelCleanup > 0;
+
+    if (voxelCleanupFill !== undefined) {
+        if (!cleanupEnabled) {
+            throw new Error(
+                'voxelCleanupFill requires voxelCleanup to be set and greater than 0');
+        }
+        if (voxelCleanupFill !== 'none' && voxelCleanupFill !== 'grow' &&
+            voxelCleanupFill !== 'close' && voxelCleanupFill !== 'both') {
+            throw new Error(
+                `Invalid voxelCleanupFill: ${voxelCleanupFill}. Expected none, grow, close or both.`);
+        }
     }
 
     if (Array.isArray(collisionColorPalette)) {

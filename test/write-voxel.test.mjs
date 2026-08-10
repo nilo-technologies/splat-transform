@@ -173,6 +173,63 @@ describe('writeVoxel autoRotate validation', function () {
     });
 });
 
+describe('writeVoxel cleanup option validation', function () {
+    const dummyCreateDevice = async () => ({});
+
+    /**
+     * Minimal table carrying every column writeVoxel requires.
+     *
+     * @returns {DataTable} One-row table.
+     */
+    function makeTable() {
+        const names = [
+            'x', 'y', 'z',
+            'rot_0', 'rot_1', 'rot_2', 'rot_3',
+            'scale_0', 'scale_1', 'scale_2',
+            'opacity'
+        ];
+        return new DataTable(names.map(name => new Column(name, new Float32Array(1))));
+    }
+
+    const run = (options) => writeVoxel({
+        filename: 'scene.voxel.json',
+        dataTable: makeTable(),
+        createDevice: dummyCreateDevice,
+        ...options
+    }, new MemoryFileSystem());
+
+    it('rejects a negative voxelCleanup', async function () {
+        await assert.rejects(
+            () => run({ voxelCleanup: -0.1 }),
+            /voxelCleanup must be >= 0/
+        );
+    });
+
+    it('rejects an unknown voxelCleanupFill', async function () {
+        await assert.rejects(
+            () => run({ voxelCleanup: 0.2, voxelCleanupFill: 'sideways' }),
+            /Invalid voxelCleanupFill/
+        );
+    });
+
+    it('rejects voxelCleanupFill without voxelCleanup', async function () {
+        await assert.rejects(
+            () => run({ voxelCleanupFill: 'grow' }),
+            /voxelCleanupFill requires voxelCleanup/
+        );
+    });
+
+    it('accepts voxelCleanup 0 as explicitly disabled', async function () {
+        // Disabled cleanup still runs the rest of the (dummy) pipeline, so this
+        // only proves validation doesn't reject 0 -- it may still reject later
+        // for unrelated reasons (no real GPU device), which is fine here.
+        await assert.rejects(
+            () => run({ voxelCleanup: 0 }),
+            (err) => !/voxelCleanup/.test(err.message)
+        );
+    });
+});
+
 describe('resolveColorSmoothRadius', function () {
     it('denoises by default only when a palette is requested', function () {
         assert.strictEqual(resolveColorSmoothRadius(undefined, undefined), undefined,

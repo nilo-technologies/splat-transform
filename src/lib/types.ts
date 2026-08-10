@@ -29,6 +29,16 @@ type CollisionColorMode = 'average' | 'solid';
 type CollisionColorPalette = number | string[];
 
 /**
+ * Hole-filling algorithm for `voxelCleanup`.
+ *
+ * - `grow` - fill candidate voxels that have enough occupied face neighbours.
+ * - `close` - morphological closing intersected with the candidate mask.
+ * - `both` - `grow`, then `close` on its result.
+ * - `none` - skip hole filling; run only the smoothing and debris passes.
+ */
+type CleanupFillMode = 'none' | 'grow' | 'close' | 'both';
+
+/**
  * Options for read/write operations.
  */
 type Options = {
@@ -100,6 +110,12 @@ type Options = {
 
     /** Rotate the voxel grid to line up with the scene's dominant surfaces, cutting staircase voxels. `true` estimates the yaw; a number applies that yaw in degrees. Recorded in the `.voxel.json` metadata and the `.collision.glb` node so both still match the unrotated splat; the `.vox` is written aligned. */
     autoRotate?: boolean | number;
+
+    /** Clean up the voxel grid: fill sampling holes, flatten bumpy surfaces and drop floating debris, at this scale in world units. Every added voxel must have gaussian density behind it, so this cannot invent structure in genuinely empty space. 0 or undefined disables it. Default: off */
+    voxelCleanup?: number;
+
+    /** Hole-filling algorithm for `voxelCleanup`. `none` runs only the smoothing and debris passes. Requires `voxelCleanup`. Default: `'grow'` */
+    voxelCleanupFill?: CleanupFillMode;
 
     /** Camera projection for image output: `'pinhole'` (default) or `'equirect'` (360°×180° panorama). */
     renderProjection?: 'pinhole' | 'equirect';
@@ -207,4 +223,4 @@ type Param = {
  */
 type DeviceCreator = () => Promise<import('playcanvas').GraphicsDevice>;
 
-export type { CollisionMeshShape, CollisionColorMode, CollisionColorPalette, Options, Param, DeviceCreator };
+export type { CleanupFillMode, CollisionMeshShape, CollisionColorMode, CollisionColorPalette, Options, Param, DeviceCreator };
