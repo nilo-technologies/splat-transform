@@ -1,7 +1,7 @@
 # Voxel yaw auto-alignment
 
 - **Date:** 2026-08-07
-- **Status:** approved, not yet implemented
+- **Status:** implemented and released in v2.7.1-nilo.6 (`6c095eb`..`0890251`, 17 commits)
 - **Scope:** `writeVoxel` and its outputs only
 
 ## Problem
@@ -120,9 +120,11 @@ and `forwardTransforms` (src/lib/process.ts:242-250):
   materialized; the estimator reads raw columns and rotates the resulting normal.
 
 A gaussian is skipped when any input is NaN, when scales are degenerate
-(non-finite or `s_mid == 0`), or when `alpha < opacityCutoff` — a splat too faint
-to produce a solid voxel must not vote. `opacity = +Infinity` yields `alpha = 1`
-and votes at full weight (real files contain these).
+(non-finite or `s_mid == 0`), when the rotation quaternion is degenerate
+(`hypot(x, y, z, w) <= 1e-8`, so it cannot be normalized), or when
+`alpha < opacityCutoff` — a splat too faint to produce a solid voxel must not
+vote. `opacity = +Infinity` yields `alpha = 1` and votes at full weight (real
+files contain these).
 
 ### Vote weight
 
@@ -135,8 +137,17 @@ area     = s_mid * s_max          // voxel count scales with patch area
 ```
 
 `flatness` is what stops organic fuzz from outvoting walls. Both factors are
-invariant to (or a global constant factor of) the uniform scale in the write
+invariant to (or a global constant factor of) the *uniform* scale in the write
 transform, which is why raw scale columns can be read directly.
+
+This invariance does not extend to non-uniform scale. The estimator rotates
+normals by `dataTable.transform.rotation` alone, but under a non-uniform scale
+(for example `--scale 1,2,1`) true engine-space normals follow the
+inverse-transpose of the linear part, so both the normal directions and the
+`s_mid * s_max` area term skew. In practice the effect is bounded — a skewed
+vote distribution raises `cost(theta*)` and so tends to trip the 2% guard rather
+than bake a wrong yaw — and `autoRotate` accepts an explicit angle to bypass
+estimation entirely. Handling non-uniform scale properly is out of scope.
 
 ### Cost function
 
@@ -180,7 +191,10 @@ at multiples of 90 and maximum `sqrt(2)` at 45, so the ceiling on improvement is
 
 ### Guard
 
-`improvement = 1 - cost(theta*) / cost(0)`. When `improvement < minImprovement`
+`improvement = 1 - cost(bin_min) / cost(0)`, where `bin_min` is the argmin bin
+rather than the sub-bin `theta*` from the parabolic fit. The parabolic fit refines
+the reported angle but not the reported saving, which is therefore very slightly
+conservative — `cost(theta*) <= cost(bin_min)`. When `improvement < minImprovement`
 (default 0.02), or when no gaussian was eligible, the result is `yawDegrees: 0`
 with a `reason` string: nothing is rotated, no metadata is written, `.vox` comes
 out exactly as today. This is what keeps an organic scene from acquiring a
@@ -206,10 +220,28 @@ type AlignYawResult = {
     curve: Float64Array;       // sampled cost over [0, 90)
     reason?: string;           // set when the guard fired
 };
+
+applyAlignYaw(
+    delta: Transform,
+    navSeed: { x: number; y: number; z: number } | undefined,
+    yawDegrees: number,
+    up?: UpAxis                // default 'y'
+): AlignYawApplied
+
+type AlignYawApplied = {
+    delta: Transform;                     // write transform with the yaw composed in
+    navSeed?: { x: number; y: number; z: number };  // seed rotated into the aligned frame, when given
+    recordedRotation: [number, number, number, number] | null;  // the inverse, for metadata; null at zero yaw
+};
 ```
 
-For `up: 'x'` the rotated component pair is `(y, z)`; for `'y'` it is `(x, z)`;
-for `'z'` it is `(x, y)`. The recorded quaternion is about the same axis.
+`UpAxis`, `AlignYawOptions`, `AlignYawResult` and `AlignYawApplied` are all public
+type exports (`src/lib/index.ts:98`), alongside the `estimateAlignYaw` and
+`applyAlignYaw` value exports (`src/lib/index.ts:94`).
+
+For the rotated component pair per up axis, see the cost-function table above —
+it is the single source of truth for the sign convention. The recorded quaternion
+is about the same axis.
 
 ### Logging
 
@@ -222,10 +254,10 @@ applied. At `--verbose`, the cost curve sampled every 5 degrees.
 
 | File | Change |
 | --- | --- |
-| `src/lib/voxel/align-yaw.ts` | new: `estimateAlignYaw`, `AlignYawOptions`, `AlignYawResult`, and the pure `applyAlignYaw(delta, navSeed, theta)` helper |
+| `src/lib/voxel/align-yaw.ts` | new: `estimateAlignYaw`, `AlignYawOptions`, `AlignYawResult`, `UpAxis`, and the pure `applyAlignYaw(delta, navSeed, yawDegrees, up?)` helper returning `AlignYawApplied` |
 | `src/lib/voxel/index.ts` | export the above |
 | `src/lib/index.ts` | public export + types, JSDoc with `@example` for typedoc |
-| `src/lib/writers/write-voxel.ts` | `WriteVoxelOptions.autoRotate?: boolean \| number`; estimate right after `delta` is computed (write-voxel.ts:459) and compose `delta = R_y(theta).mul(delta)`; rotate `navSeed`; `VoxelMetadata.rotation?: [x,y,z,w]` and `version: '1.1' \| '1.2'`; `writeOctreeFiles(fs, filename, octree, rotation?)` |
+| `src/lib/writers/write-voxel.ts` | `WriteVoxelOptions.autoRotate?: boolean \| number`; estimate right after `delta` is computed (as implemented, write-voxel.ts:477-507) and compose `delta = R_y(theta).mul(delta)`; rotate `navSeed`; `VoxelMetadata.rotation?: [x,y,z,w]` and `version: '1.1' \| '1.2'`; `writeOctreeFiles(fs, filename, octree, rotation?)` |
 | `src/lib/writers/collision-glb.ts` | `buildCollisionMesh(...)` gains a 6th optional `options?: { nodeRotation?: [x,y,z,w] }` |
 | `src/cli/index.ts` | `--auto-rotate[=deg]` global option, registered in `optionalValueOptions` with `isNumericValue`; warn-and-ignore without a voxel output; usage text beside the `--collision-*` block |
 
@@ -417,6 +449,12 @@ or -18.33deg either. What *does* hold up robustly is the big picture: 0deg
 useful confirmation of *sign and rough scale*, not of *exact-degree
 precision* — the same caveat as the real `dungeons-3.ply` sweep, just with a
 large-enough signal that the directional conclusion survives the noise.
+
+Open follow-up: this sweep cannot separate quantization aliasing from genuine
+estimator bias, because both would displace the minimum away from -18.33deg.
+Re-running it at a finer voxel size would distinguish them — aliasing shrinks
+with resolution while bias does not. Worth doing before anyone treats the
+per-degree numbers above as an estimator accuracy measurement.
 
 Attempting the same investigation on `industrial.ply` (both the brief's
 7-point sweep and a finer set) makes the noise floor obvious rather than
