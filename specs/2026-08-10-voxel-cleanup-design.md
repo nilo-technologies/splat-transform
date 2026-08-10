@@ -265,6 +265,11 @@ the pad later cannot introduce a silent boundary bug.
 
 ### Stage 2 — `majority`
 
+> **Amended** by `specs/2026-08-10-voxel-cleanup-sheet-aware-design.md`. The removal rule below
+> is a thickness test, not a roughness test: it erases 1-voxel-thick sheets, which can never
+> reach the threshold. Removals are now additionally gated on occupied face-neighbour count.
+> Everything else in this section still holds.
+
 New `src/lib/voxel/majority.ts`. A 3x3x3 neighbourhood in sparse block form means 6 faces
 plus 12 edges plus 8 corners; a chunked dense pass is both simpler and faster.
 
