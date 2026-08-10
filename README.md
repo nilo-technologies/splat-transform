@@ -217,6 +217,13 @@ Apply when writing `.voxel.json` (sparse voxel octree for collision detection). 
                                           Default size: 1.6
     --voxel-carve      [h,r]            Carve navigable space using capsule flood fill from seed.
                                           Default: height=1.6, radius=0.2
+    --voxel-cleanup    [size]           Fill sampling holes, flatten bumpy surfaces and drop floating
+                                          debris at this scale. Only voxels with gaussian density behind
+                                          them are ever added, so real gaps and openings survive.
+                                          Bare flag uses 2x the voxel size. Default: off
+    --voxel-cleanup-fill [none|grow|close|both]
+                                          Hole-filling algorithm for --voxel-cleanup. none runs only
+                                          the smoothing and debris passes. Default: grow
     --seed-pos         <x,y,z>          Seed position for voxel fill/carve and --filter-cluster.
                                           Default: 0,0,0
 -K, --collision-mesh   [smooth|faces|voxel|tris]
@@ -279,6 +286,44 @@ splat-transform building.ply building.voxel.json --auto-rotate
 # Apply a known 15 degree yaw directly, skipping estimation
 splat-transform building.ply building.voxel.json --auto-rotate 15
 ```
+
+### Cleaning up a scattered voxel grid
+
+Voxelizing thresholds a continuous gaussian density field, and nothing afterwards reconstructs a
+surface. When a scene's splats are small relative to the voxel size — common on large outdoor
+captures at 5-10 cm — the result is not a surface at all but a scatter of near-isolated voxels:
+full of holes, and violently bumpy. `--voxel-cleanup` fixes both, because they are the same
+problem.
+
+It runs three passes: fill voxels that look like holes in an existing surface, regularize the
+surface with a 3x3x3 majority filter, then drop islands smaller than one 4x4x4 block.
+
+Crucially, **every voxel it adds must have gaussian density behind it.** The cleanup samples the
+same field a second time at a far lower opacity threshold and uses that as a mask, so a real
+window opening, a real gap between a railing and a deck, or a real void inside a building has no
+density and is untouchable at any scale. Morphological closing on its own would fabricate: on the
+scene below, an ungated close at the same radius placed ~140,000 voxels in effective vacuum, 46%
+of everything it added. The gated pipeline places none.
+
+On a 24x21x38 m city rooftop capture at 10 cm:
+
+| | occupied voxels | disconnected islands | in the largest | surface roughness |
+| --- | --- | --- | --- | --- |
+| without | 288,184 | 13,602 | 60.4% | 9.8 voxels |
+| `--voxel-cleanup 0.2` | 202,947 | 64 | 77.6% | 3.3 voxels |
+
+Note the voxel count goes *down*: it is removing noise, not adding bulk.
+
+```bash
+splat-transform city.spz city.voxel.json --voxel-params 0.1,0.1 --voxel-cleanup 0.2
+```
+
+Pass roughly twice the voxel size to start. A bare `--voxel-cleanup` does exactly that.
+`--voxel-cleanup-fill none` skips hole filling and runs only the smoothing and debris passes, for
+scenes whose coverage is already good.
+
+The log reports surface coherence before cleanup, and suggests the flag when a grid is mostly
+scatter, so you can tell whether a scene needs it.
 
 The two spatial options are independent: `--collision-color-smooth` cleans the colors *before* the palette is built, `--collision-color-coherent` cleans the assignment *after*. Radii are in voxels, so they scale with `--voxel-params` size.
 
