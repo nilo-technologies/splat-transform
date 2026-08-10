@@ -2,14 +2,23 @@
  * Tests for voxel writer file contracts.
  */
 
-import { describe, it } from 'node:test';
+import { spawn } from 'node:child_process';
+import { readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { before, describe, it } from 'node:test';
 import assert from 'node:assert';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { Vec3 } from 'playcanvas';
 
 import { Column, DataTable } from '../src/lib/index.js';
 import { MemoryFileSystem } from '../src/lib/io/write/index.js';
 import { resolveColorSmoothRadius, writeOctreeFiles, writeVoxel } from '../src/lib/writers/write-voxel.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const rootDir = dirname(__dirname);
+const harnessPath = join(__dirname, 'helpers', 'write-voxel-cleanup-harness.mjs');
 
 function makeOctree() {
     return {
@@ -227,6 +236,80 @@ describe('writeVoxel cleanup option validation', function () {
             () => run({ voxelCleanup: 0 }),
             (err) => !/voxelCleanup/.test(err.message)
         );
+    });
+});
+
+describe('writeVoxel cleanup behaviour', function () {
+    // The cleanup phase sits after GPU voxelization, so these run the whole
+    // writer with a real device. That happens in a helper subprocess: Dawn's
+    // node binding keeps the event loop alive natively after a device session
+    // with nothing public to unref (the CLI force-exits for the same reason),
+    // and a test file cannot force-exit without abandoning the other suites.
+    // A subprocess also isolates device loss (e.g. the display sleeping) to a
+    // clear failure instead of a poisoned shared device.
+    let result = null;
+
+    before(async () => {
+        const outFile = join(tmpdir(), `wv-cleanup-${process.pid}-${Date.now()}.json`);
+        try {
+            const run = await new Promise((resolve, reject) => {
+                const child = spawn(process.execPath, [
+                    '--import', 'tsx',
+                    harnessPath,
+                    outFile
+                ], {
+                    cwd: rootDir,
+                    env: { ...process.env, NO_COLOR: '1' },
+                    stdio: ['ignore', 'pipe', 'pipe']
+                });
+                let stdout = '';
+                let stderr = '';
+                child.stdout.setEncoding('utf8');
+                child.stderr.setEncoding('utf8');
+                child.stdout.on('data', chunk => {
+                    stdout += chunk;
+                });
+                child.stderr.on('data', chunk => {
+                    stderr += chunk;
+                });
+                child.on('error', reject);
+                child.on('close', code => {
+                    resolve({ code, stdout, stderr });
+                });
+            });
+            assert.strictEqual(run.code, 0,
+                `harness failed:\n${run.stderr}\n${run.stdout}`);
+            result = JSON.parse(await readFile(outFile, 'utf8'));
+        } finally {
+            await rm(outFile, { force: true });
+        }
+    });
+
+    it('produces byte-identical output when cleanup is absent', async function (t) {
+        if (result?.unavailable) return t.skip('WebGPU unavailable');
+        assert.deepStrictEqual(result.disabled.bin, result.plain.bin,
+            'voxelCleanup 0 must match the absent case');
+    });
+
+    it('changes the grid when cleanup is enabled', async function (t) {
+        if (result?.unavailable) return t.skip('WebGPU unavailable');
+        // The satellite cluster is too small and sparse to survive the
+        // cleanup passes, so its octree leaves disappear outright; the slab
+        // itself is only smoothed. Verified empirically: 20 -> 18 mixed
+        // leaves, and the satellite's interior branch collapses.
+        assert.ok(
+            result.cleaned.meta.numMixedLeaves < result.plain.meta.numMixedLeaves,
+            `cleanup should drop the satellite's leaves: ` +
+            `${result.cleaned.meta.numMixedLeaves} !< ${result.plain.meta.numMixedLeaves}`);
+        assert.notStrictEqual(result.cleaned.bin, result.plain.bin,
+            'cleanup should alter the voxel data');
+        assert.ok(result.cleaned.meta.nodeCount > 0,
+            'cleanup must not erase the whole grid');
+    });
+
+    it('rejects an unimplemented fill mode at the writer level', async function (t) {
+        if (result?.unavailable) return t.skip('WebGPU unavailable');
+        assert.match(result.closeError ?? '', /not implemented yet/);
     });
 });
 

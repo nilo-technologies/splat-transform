@@ -43,14 +43,15 @@ const SOLID_MASK = 0xFFFFFFFF >>> 0;
  * @param nbx - Grid block dimension X (used to decode block indices).
  * @param nby - Grid block dimension Y (used to decode block indices).
  * @param nbz - Grid block dimension Z (used for neighbor bounds checks).
- * @returns New BlockMaskBuffer with filtered/filled data.
+ * @returns The filtered/filled buffer and the per-pass voxel counts, so a
+ * caller can report a large silent loss.
  */
 function filterAndFillBlocks(
     buffer: BlockMaskBuffer,
     nbx: number,
     nby: number,
     nbz: number
-): BlockMaskBuffer {
+): { buffer: BlockMaskBuffer; voxelsRemoved: number; voxelsFilled: number } {
     const mixed = buffer.getMixedBlocks();
     const solid = buffer.getSolidBlocks();
     const masks = mixed.masks;
@@ -188,7 +189,7 @@ function filterAndFillBlocks(
 
     logger.debug(`block cleanup: ${voxelsRemoved} voxels removed, ${voxelsFilled} voxels filled`);
 
-    return result;
+    return { buffer: result, voxelsRemoved, voxelsFilled };
 }
 
 // ============================================================================

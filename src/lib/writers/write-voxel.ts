@@ -18,9 +18,12 @@ import {
     filterAndFillBlocks,
     alignGridBounds,
     assertGridFits,
+    CANDIDATE_CUTOFF,
     carve,
+    cleanupGrid,
     fillExterior,
     fillFloor,
+    type BlockMaskBuffer,
     type CleanupFillMode,
     type NavSeed,
     voxelizeToBuffer
@@ -54,6 +57,38 @@ const resolveColorSmoothRadius = (
 ): number | undefined => {
     if (explicit !== undefined) return explicit;
     return palette !== undefined ? DEFAULT_COLLISION_COLOR_SMOOTH : undefined;
+};
+
+/**
+ * Fraction of occupied voxels with at most two of six face neighbours.
+ *
+ * A coherent surface sits near zero; a sampling scatter runs above 0.3. This is
+ * the signal that a scene needs `voxelCleanup`, so it is reported even when
+ * cleanup is off.
+ *
+ * @param grid - Grid to measure.
+ * @returns The fraction, or 0 for an empty grid.
+ */
+const scatterFraction = (grid: SparseVoxelGrid): number => {
+    const { nx, ny, nz } = grid;
+    let occupied = 0;
+    let sparse = 0;
+    grid.forEachOccupiedVoxel((x, y, z) => {
+        occupied++;
+        let n = 0;
+        // Every bound is guarded in both directions. getVoxel does no bounds
+        // checking and its block index aliases across rows -- on an 8^3 grid
+        // getVoxel(8, 0, 0) returns the voxel at (0, 4, 0) -- so an unguarded
+        // upper-bound read would silently count a wrapped neighbour.
+        if (x + 1 < nx && grid.getVoxel(x + 1, y, z)) n++;
+        if (x > 0 && grid.getVoxel(x - 1, y, z)) n++;
+        if (y + 1 < ny && grid.getVoxel(x, y + 1, z)) n++;
+        if (y > 0 && grid.getVoxel(x, y - 1, z)) n++;
+        if (z + 1 < nz && grid.getVoxel(x, y, z + 1)) n++;
+        if (z > 0 && grid.getVoxel(x, y, z - 1)) n++;
+        if (n <= 2) sparse++;
+    });
+    return occupied === 0 ? 0 : sparse / occupied;
 };
 
 /**
@@ -600,6 +635,22 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         const buffer = await voxelizeToBuffer(
             bvh, gpuVoxelization, gridBounds, voxelResolution, opacityCutoff
         );
+
+        // Candidate mask: the same field at a much lower cutoff, marking
+        // everywhere the gaussians have measurable presence. Cleanup may only
+        // add voxels inside it, so it cannot invent structure in empty space.
+        // A second pass rather than a second mask out of one dispatch: a full
+        // pass measures ~250ms on a 24x21x38m scene at 0.1m, which is not worth
+        // reworking the voxelization shader for.
+        let candidateBuffer: BlockMaskBuffer | null = null;
+        if (cleanupEnabled) {
+            const candSub = logger.group('Candidate mask');
+            candidateBuffer = await voxelizeToBuffer(
+                bvh, gpuVoxelization, gridBounds, voxelResolution, CANDIDATE_CUTOFF
+            );
+            candSub.end();
+        }
+
         if (!needsSplatColors) {
             bvh = null;
             pcDataTable = null;
@@ -614,8 +665,16 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         const nbxInit = Math.round((gridBounds.max.x - gridBounds.min.x) / (4 * voxelResolution));
         const nbyInit = Math.round((gridBounds.max.y - gridBounds.min.y) / (4 * voxelResolution));
         const nbzInit = Math.round((gridBounds.max.z - gridBounds.min.z) / (4 * voxelResolution));
-        const filteredBuffer = filterAndFillBlocks(buffer, nbxInit, nbyInit, nbzInit);
+        const { buffer: filteredBuffer, ...cleanupCounts } = filterAndFillBlocks(buffer, nbxInit, nbyInit, nbzInit);
         buffer.clear();
+        const removedFraction = filteredBuffer.count > 0 ?
+            cleanupCounts.voxelsRemoved / (filteredBuffer.count * 64) :
+            0;
+        if (removedFraction > 0.05) {
+            logger.info(
+                `block cleanup removed ${fmtCount(cleanupCounts.voxelsRemoved)} isolated voxels ` +
+                `(${(removedFraction * 100).toFixed(0)}% of the grid)`);
+        }
         filterSub.end();
 
         // Buffer → grid: the single conversion in the pipeline. Every phase
@@ -632,6 +691,46 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         loadBar.end();
         filteredBuffer.clear();
         loadSub.end();
+
+        const scatter = scatterFraction(grid);
+        logger.info(`surface coherence: ${(scatter * 100).toFixed(0)}% of voxels have <= 2 of 6 neighbours`);
+        if (scatter > 0.2 && !cleanupEnabled) {
+            logger.warn(
+                'this grid is mostly scattered voxels rather than surfaces; ' +
+                `--voxel-cleanup ${(voxelResolution * 2).toFixed(3)} would fill the sampling ` +
+                'holes and flatten it');
+        }
+
+        if (cleanupEnabled && candidateBuffer) {
+            const cleanSub = logger.group('Cleanup');
+            // The candidate grid is deliberately built without
+            // filterAndFillBlocks: the candidate set is evidence, not
+            // geometry, and eroding it would narrow the gate.
+            const candidateGrid = SparseVoxelGrid.fromBuffer(
+                candidateBuffer, nxInit, nyInit, nzInit
+            );
+            candidateBuffer.clear();
+            candidateBuffer = null;
+
+            const cleaned = cleanupGrid(grid, candidateGrid, {
+                strength: voxelCleanup!,
+                voxelResolution,
+                fill: voxelCleanupFill
+            });
+            grid = cleaned.grid;
+            candidateGrid.releaseStorage();
+
+            const s = cleaned.stats;
+            logger.info(
+                `cleanup: radius ${s.radius} voxels, +${fmtCount(s.grown)} grown, ` +
+                `+${fmtCount(s.majorityAdded)}/-${fmtCount(s.majorityRemoved)} smoothed, ` +
+                `-${fmtCount(s.despeckled)} despeckled ` +
+                `(${fmtCount(s.componentsRemoved)} of ${fmtCount(s.components)} islands)`);
+            logger.info(
+                `cleanup gate: ${fmtCount(s.gateRejected)} voxels blocked for having no ` +
+                'gaussian density behind them');
+            cleanSub.end();
+        }
 
         // Reuse the same device for GPU dilation across exterior, floor, carve.
         const needsGpuDilation = hasFillExterior || hasNav || (hasFloorFill && floorFillDilation > 0);
