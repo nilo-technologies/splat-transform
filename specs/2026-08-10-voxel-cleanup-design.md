@@ -171,15 +171,23 @@ crop, so the octree, `.vox` and collision GLB all inherit the cleaned grid.
 
 ### Candidate mask
 
-`src/lib/gpu/gpu-voxelization.ts:191-202` already holds `totalSigma` and compares it once.
-It gains a second comparison against `CANDIDATE_CUTOFF` and a second `atomicOr` into a
-doubled results region. The expensive Gaussian evaluation is unchanged, so the candidate mask
-costs no additional voxelization pass. `voxelizeToBuffer` returns both buffers and builds the
-candidate one only when cleanup is enabled, so the default path allocates nothing extra.
+The candidate mask is produced by a **second `voxelizeToBuffer` call** at `CANDIDATE_CUTOFF`,
+issued before `gpuVoxelization` is destroyed, and converted with `SparseVoxelGrid.fromBuffer`
+without block cleanup. It only runs when cleanup is enabled.
+
+An earlier draft of this spec called for emitting both masks from one dispatch — a second
+comparison against `CANDIDATE_CUTOFF` and a second `atomicOr` into a doubled results region in
+`src/lib/gpu/gpu-voxelization.ts:191-202`. That was rejected on measurement: a full
+voxelization pass over `urban.spz` at 0.1 m takes **250 ms**, so the second pass costs 0.25 s
+on the target scene. Single-pass dual emission would touch the WGSL, the uniform format, the
+results-buffer sizing, `ensureSlotBuffer`'s growth arithmetic and `processResults` — the highest
+risk in the feature — to save a quarter of a second. It remains available later as a pure
+optimization behind `voxelizeToBuffer`, with no API change.
 
 `filterAndFillBlocks` continues to run on the solid buffer only, unchanged. Every measurement
 in this document was taken with it enabled, so removing or gating it would invalidate the
-figures above.
+figures above. It is deliberately **not** applied to the candidate mask: the candidate set is
+evidence, not geometry, and eroding it would narrow the gate.
 
 Memory: at a 0.002 gate the candidate set runs roughly 3-4x the solid set (793,764 against
 288,184 on `urban.spz`). On `landscape.spz` at 0.01 m that is on the order of an extra 80 MB
@@ -207,6 +215,13 @@ Where `block-cleanup` ORs and ANDs the six masks, `grow` bit-slices a **count**:
 planes accumulated with carry-save adders across the six masks (a maximum of 6 needs 3 bits,
 about 24 bit operations per 32-bit word). New voxels are
 `~occupied & candidate & (count >= minNeighbors)`.
+
+`grow` reads neighbour block masks straight off the `SparseVoxelGrid`, which already offers O(1)
+block lookup through `getBlockType` plus `masks.slot`, rather than rebuilding `block-cleanup`'s
+`IntKeyMap` side tables — those exist only because that function consumes a `BlockMaskBuffer`.
+The six directional mask computations move into a new `src/lib/voxel/block-neighbors.ts`
+parameterised by a block-reader callback. `block-cleanup.ts` keeps its own copy for now;
+migrating it onto the shared helper is a follow-up, not part of this work.
 
 Each iteration reads a snapshot, so the result is independent of block iteration order. The
 iteration runs over the **union** of the solid and candidate block sets, because a hole's
@@ -266,28 +281,43 @@ plus 12 edges plus 8 corners; a chunked dense pass is both simpler and faster.
 
 ### Stage 3 — `despeckle`
 
-New `src/lib/voxel/despeckle.ts`. 6-connected component labelling reusing the two-level BFS
-in `src/lib/voxel/flood-fill.ts` — a block queue for wholly-solid blocks and a voxel queue for
-mixed blocks — whose queues grow geometrically and throw rather than truncate
-(`flood-fill.ts:80`).
+New `src/lib/voxel/despeckle.ts`. 6-connected component labelling over the **occupied** set.
 
-Two passes bound memory: pass 1 records each component's seed voxel and size; pass 2 re-floods
-only the components below `minVoxels` and clears them. Sub-threshold components are by
-definition small, so pass 2 is cheap.
+An earlier draft called for reusing `twoLevelBFS` from `src/lib/voxel/flood-fill.ts`. That is
+the wrong primitive: `twoLevelBFS(blocked, ...)` floods the *free* space around obstacles, so
+using it here would require materialising the complement of a sparse shell — nearly the whole
+volume. Despeckle needs the opposite traversal.
+
+The labeller is therefore its own voxel-level BFS over occupied voxels with a visited grid,
+using a single pass rather than the two the earlier draft described: flood from each unvisited
+occupied voxel, collecting members into a reusable buffer capped at `minVoxels` entries. If the
+component finishes under the cap, its members are all in hand and get cleared; if it exceeds
+the cap it is a keeper and the buffer is discarded. Either way every occupied voxel is visited
+exactly once, so the pass is O(occupied) with O(minVoxels) scratch — no re-flood.
+
+Clearing requires `SparseVoxelGrid.clearVoxel`, which does not exist today: the class has
+`setVoxel`, `orBlock`, `setBlockType` and `clear`, but no way to unset a single voxel. Adding it
+is a prerequisite task, and it is a genuine gap in the data structure rather than a cleanup
+concern — a `SOLID` block must demote to `MIXED` with a full mask minus one bit, and a `MIXED`
+block whose mask empties must demote to `EMPTY`.
 
 ## Delivery order
 
 Each group is independently shippable and testable.
 
-1. The two prerequisite bug fixes, in the order listed below.
-2. Candidate mask plumbing through the GPU voxelizer and `voxelizeToBuffer`.
-3. Stage 1a `grow`, plus its `growGrid` export.
-4. Stage 2 `majority` and stage 3 `despeckle`, plus their exports.
-5. CLI and `Options` wiring for `--voxel-cleanup` / `--voxel-cleanup-fill`, default `grow`.
-   At this point the default mode is fully functional and the acceptance run can be performed.
-6. Stage 1b `close`, including the GPU erode mode and `cleanupPad`. This is where the
+1. **Prerequisite fixes** (landed): the two bug fixes below.
+   Plan: `specs/2026-08-10-voxel-cleanup-prereq-fixes-plan.md`.
+2. **Cleanup primitives**: `SparseVoxelGrid.clearVoxel`, `block-neighbors.ts`, `growGrid`,
+   `majorityFilterGrid`, `despeckleGrid` — pure library functions, unit tested and exported.
+3. **Integration**: the `cleanupGrid` orchestrator and dial mapping, the candidate-mask second
+   voxelization pass, `writeVoxel` wiring, `--voxel-cleanup` / `--voxel-cleanup-fill` with
+   `grow` as default, observability, documentation, and the acceptance run. Ships the feature.
+4. **Stage 1b `close`**: the GPU erode mode and `cleanupPad`. This is where the
    `dilation.ts:223` fix from group 1 stops being merely defensive.
-7. Observability and documentation.
+
+Group 2 produces exported, tested library functions; group 3 makes them reachable from the CLI.
+`close` lands last because `grow` is the default and needs no new GPU code, so the feature is
+usable and measurable before any WGSL is written.
 
 `close` lands after the CLI wiring deliberately: `grow` is the default and needs no new GPU
 code, so the feature is usable and measurable before the shader work begins.
