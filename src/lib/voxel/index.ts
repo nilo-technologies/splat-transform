@@ -15,3 +15,5 @@ export { estimateAlignYaw, applyAlignYaw } from './align-yaw';
 export type { AlignYawOptions, AlignYawResult, AlignYawApplied, UpAxis } from './align-yaw';
 export { growGrid } from './grow';
 export type { GrowOptions, GrowResult } from './grow';
+export { majorityFilterGrid } from './majority';
+export type { MajorityOptions, MajorityResult } from './majority';
