@@ -279,7 +279,7 @@ definition small, so pass 2 is cheap.
 
 Each group is independently shippable and testable.
 
-1. The three prerequisite bug fixes, in the order listed below.
+1. The two prerequisite bug fixes, in the order listed below.
 2. Candidate mask plumbing through the GPU voxelizer and `voxelizeToBuffer`.
 3. Stage 1a `grow`, plus its `growGrid` export.
 4. Stage 2 `majority` and stage 3 `despeckle`, plus their exports.
@@ -294,31 +294,39 @@ code, so the feature is usable and measurable before the shader work begins.
 
 ## Prerequisite bug fixes
 
-These land first, each independently testable.
+These land first, each independently testable. A third item, originally reported as a CLI
+parsing bug, was retracted on verification and is recorded below for the record.
 
-### 1. `dilation.ts:223` writes block types with `|=` instead of `=`
+### 1. `dilation.ts:223` cannot overwrite an occupied block-type field
 
 ```
 dstTypes[w] |= bt << shift;
 ```
 
-Chunks are disjoint today, so this is dormant. If two chunks ever wrote the same block,
-`SOLID (1) | MIXED (2) = 3`, an invalid type. `getVoxel` then falls through to the mask
-lookup (`src/lib/voxel/sparse-voxel-grid.ts:151-155`), finds no entry, and reports the whole
-block as **empty**. Stage 1b adds a second consumer of this path, so the latent trap is fixed
-before it is built upon.
+`|=` can only set bits. That is correct for accumulating *different* blocks into a shared
+`types` word — 16 blocks pack into each word at 2 bits apiece — but it cannot overwrite a field
+that already holds a value. Chunks are disjoint today, so every field is written at most once
+into freshly zeroed memory and the defect is inert. If two chunks ever wrote the same block,
+`SOLID (1) | MIXED (2) = 3`, an invalid type. `getVoxel` then falls through to the mask lookup
+(`src/lib/voxel/sparse-voxel-grid.ts:151-155`), finds no entry, and reports the whole block as
+**empty**. Stage 1b adds a second consumer of this path, so the latent trap is fixed before it
+is built upon.
+
+Fix: call the canonical `writeBlockType` (`src/lib/voxel/sparse-voxel-grid.ts:89-93`, already
+exported), which clears the field before setting it. **Not** a bare `=`: that would wipe the
+other 15 blocks sharing the word.
 
 ### 2. Unguarded grid-size limits
 
 Voxelizing unfiltered `landscape.spz` at 0.1 m throws
 `RangeError: Invalid typed array length: -2147483648` from `IntKeyMap`
 (`src/lib/voxel/block-cleanup.ts:62`, `src/lib/utils/int-key-map.ts:38`). Its 3-sigma scene
-bounds span 593.6 x 370.7 x 882.9 m because of outlier splats, giving 3.04e9 blocks.
+bounds span 593.6 x 370.7 x 882.9 m because of outlier splats, giving 3,037,474,944 blocks.
 
 That throw is the *lucky* failure. The same grid also exceeds 2^31 blocks, tripping the silent
 `BlockMaskMap` `Int32Array` key overflow (`src/lib/voxel/block-mask-map.ts:12,24,45`), which
 loses every MIXED block's mask — that is, every surface block — while SOLID interiors survive.
-At 0.01 m the same scene reaches 3.04e12 blocks, past 2^32 into silent `types` word aliasing
+At 0.01 m the same scene reaches roughly 3.04e12 blocks, past 2^32 into silent `types` word aliasing
 (`src/lib/voxel/sparse-voxel-grid.ts:75,90,122`).
 
 Fix: an explicit grid-size guard on the voxel write path, mirroring the one
@@ -326,19 +334,34 @@ Fix: an explicit grid-size guard on the voxel write path, mirroring the one
 names the block count and suggests a filter or a coarser resolution. A better message for the
 `IntKeyMap` limit alone would not address the silent variants.
 
+The ceiling is set by the tightest of the three limits. `IntKeyMap` needs its capacity under
+2^30 and sizes itself at `blocks / 0.7`, so blocks must stay under `0.7 * 2^30` (about 751.6e6).
+`MAX_GRID_BLOCKS = 2^29` (536,870,912) is the clean power of two below that and clears the 2^31
+and 2^32 limits as well. For calibration: `urban.spz` is 1.55e6 blocks and a filtered
+`landscape.spz` at 0.01 m is 90,453,870 blocks, both far inside.
+
 This never affected the reported `urban.spz` output, whose grid is 1.55e6 blocks.
 
-### 3. `--filter-cluster <path>` silently becomes the output positional
+### 3. Retracted: `--filter-cluster <path>` is not a bug
 
-`--filter-cluster` is registered as an optional-value option that consumes its next token only
-when the token is numeric (`src/cli/index.ts:196-215`). Given
-`--filter-cluster ./scenes/scene.voxel.json`, the path fails `isNumericValue`, falls through to
-the positionals, and becomes the **output file**, while `--filter-cluster` silently runs with
-defaults. This happened in the reported run: the output landed in `scenes/scene.voxel.json`,
-not `urban.voxel.json`.
+An earlier draft of this spec claimed that `--filter-cluster ./scenes/scene.voxel.json`
+silently swallowed the path and misdirected the output. That claim was wrong and the proposed
+warning would have been a regression.
 
-Fix: warn when an optional-value option is followed by a non-numeric, non-option token that
-subsequently lands in the positionals. Behaviour is unchanged; the silence is not.
+`--filter-cluster` is an optional-value option that consumes its next token only when the token
+is numeric (`src/cli/index.ts:196-215`). A path is not numeric, so it falls through to the
+positionals and becomes the output file. That is the deliberate, tested idiom for every
+optional-value option — `test/cli.test.mjs:457`, "accepts a bare `--auto-rotate` without
+swallowing the output argument", exercises exactly this shape with `--auto-rotate null`. A
+warning on the pattern would fire on every correct invocation.
+
+No filename form can be eaten by accident either: `./scenes/scene.voxel.json`, `null`,
+`out.ply`, `1.ply`, `12.ply` and `2024-scene.ply` all fail `isNumericValue`. Only a digits-only
+filename such as `123` would be consumed, and the run then fails on a missing output rather
+than misbehaving quietly.
+
+The reported command supplied no other output positional, so `scenes/scene.voxel.json` is
+where it asked the output to go. No change.
 
 ## Observability
 
@@ -395,9 +418,9 @@ Wiring:
 - Dial mapping: `voxelCleanup: 0.2` at `voxelResolution: 0.1` yields `r = 2`; a sub-voxel
   value clamps to `r = 1`.
 - `--voxel-cleanup-fill` without `--voxel-cleanup` errors.
-- `--filter-cluster ./x.voxel.json` warns (regression for bug fix 3).
-- A grid exceeding 2^30 blocks raises the guard error naming the block count (regression for
-  bug fix 2).
+- A grid exceeding `MAX_GRID_BLOCKS` raises the guard error naming the block count, the limit
+  and the voxel resolution, and pointing at both `--voxel-params` and `--filter-box`
+  (regression for bug fix 2).
 
 Acceptance on the real scene, run manually and recorded in the implementation plan. The
 reported command with the new flag added:
@@ -418,7 +441,6 @@ splat-transform ./scenes/urban.spz \
 ```
 
 must reach components <= 100, top-surface roughness <= 4.0 voxels, and 0 fabricated voxels.
-Note the explicit output positional, which the reported run lacked — see bug fix 3.
 
 ## Out of scope
 
