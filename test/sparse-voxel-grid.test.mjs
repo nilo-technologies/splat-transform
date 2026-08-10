@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
-import { SparseVoxelGrid } from '../src/lib/voxel/sparse-voxel-grid.js';
+import { BLOCK_EMPTY, BLOCK_MIXED, BLOCK_SOLID, SparseVoxelGrid } from '../src/lib/voxel/sparse-voxel-grid.js';
 
 /**
  * Reference implementation: dense raster walk over every cell.
@@ -115,5 +115,85 @@ describe('SparseVoxelGrid.forEachOccupiedVoxel', () => {
 
         assert.deepStrictEqual(sparseOccupied(grid), denseOccupied(grid));
         assert.strictEqual(sparseOccupied(grid).length, 64 + 4);
+    });
+});
+
+describe('SparseVoxelGrid.clearVoxel', function () {
+    it('clears a voxel from a mixed block', function () {
+        const g = new SparseVoxelGrid(8, 8, 8);
+        g.setVoxel(1, 1, 1);
+        g.setVoxel(2, 1, 1);
+        g.clearVoxel(1, 1, 1);
+        assert.strictEqual(g.getVoxel(1, 1, 1), 0);
+        assert.strictEqual(g.getVoxel(2, 1, 1), 1);
+    });
+
+    it('demotes a mixed block to empty when its last voxel goes', function () {
+        const g = new SparseVoxelGrid(8, 8, 8);
+        g.setVoxel(1, 1, 1);
+        assert.strictEqual(g.getBlockType(0), BLOCK_MIXED);
+        g.clearVoxel(1, 1, 1);
+        assert.strictEqual(g.getBlockType(0), BLOCK_EMPTY);
+        assert.strictEqual(g.getVoxel(1, 1, 1), 0);
+        assert.strictEqual(g.masks.size, 0, 'mask slot must be released');
+    });
+
+    it('demotes a solid block to mixed, keeping the other 63 voxels', function () {
+        const g = new SparseVoxelGrid(4, 4, 4);
+        for (let z = 0; z < 4; z++) {
+            for (let y = 0; y < 4; y++) {
+                for (let x = 0; x < 4; x++) g.setVoxel(x, y, z);
+            }
+        }
+        assert.strictEqual(g.getBlockType(0), BLOCK_SOLID);
+        g.clearVoxel(2, 3, 3);
+        assert.strictEqual(g.getBlockType(0), BLOCK_MIXED);
+        assert.strictEqual(g.getVoxel(2, 3, 3), 0);
+        let count = 0;
+        g.forEachOccupiedVoxel(() => count++);
+        assert.strictEqual(count, 63);
+    });
+
+    it('clears a hi-word voxel of a solid block', function () {
+        // bitIdx >= 32 exercises the hi half; iz 2 and 3 live in hi
+        const g = new SparseVoxelGrid(4, 4, 4);
+        for (let z = 0; z < 4; z++) {
+            for (let y = 0; y < 4; y++) {
+                for (let x = 0; x < 4; x++) g.setVoxel(x, y, z);
+            }
+        }
+        g.clearVoxel(0, 0, 2);
+        assert.strictEqual(g.getVoxel(0, 0, 2), 0);
+        assert.strictEqual(g.getVoxel(0, 0, 1), 1);
+        assert.strictEqual(g.getVoxel(0, 0, 3), 1);
+    });
+
+    it('is a no-op on an already-empty block', function () {
+        const g = new SparseVoxelGrid(8, 8, 8);
+        g.clearVoxel(5, 5, 5);
+        assert.strictEqual(g.getBlockType(0), BLOCK_EMPTY);
+        assert.strictEqual(g.masks.size, 0);
+    });
+
+    it('is a no-op on an already-clear voxel of a mixed block', function () {
+        const g = new SparseVoxelGrid(8, 8, 8);
+        g.setVoxel(1, 1, 1);
+        g.clearVoxel(2, 2, 2);
+        assert.strictEqual(g.getVoxel(1, 1, 1), 1);
+        assert.strictEqual(g.getVoxel(2, 2, 2), 0);
+        assert.strictEqual(g.getBlockType(0), BLOCK_MIXED);
+    });
+
+    it('round-trips set then clear back to the original state', function () {
+        const g = new SparseVoxelGrid(8, 8, 8);
+        g.setVoxel(0, 0, 0);
+        g.setVoxel(7, 7, 7);
+        const before = [...g.types];
+        g.setVoxel(3, 3, 3);
+        g.clearVoxel(3, 3, 3);
+        assert.deepStrictEqual([...g.types], before);
+        let count = 0;
+        g.forEachOccupiedVoxel(() => count++);
+        assert.strictEqual(count, 2);
     });
 });

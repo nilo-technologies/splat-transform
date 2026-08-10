@@ -177,6 +177,45 @@ class SparseVoxelGrid {
         }
     }
 
+    /**
+     * Unset a single voxel, demoting the containing block as needed.
+     *
+     * A `SOLID` block becomes `MIXED` with a full mask minus this one bit; a
+     * `MIXED` block whose mask empties releases its mask slot and becomes
+     * `EMPTY`. Clearing an already-clear voxel is a no-op.
+     *
+     * @param ix - Voxel X index.
+     * @param iy - Voxel Y index.
+     * @param iz - Voxel Z index.
+     */
+    clearVoxel(ix: number, iy: number, iz: number): void {
+        const blockIdx = (ix >> 2) + (iy >> 2) * this.nbx + (iz >> 2) * this.bStride;
+        const bt = this.getBlockType(blockIdx);
+        if (bt === BLOCK_EMPTY) return;
+
+        const bitIdx = (ix & 3) + ((iy & 3) << 2) + ((iz & 3) << 4);
+
+        if (bt === BLOCK_SOLID) {
+            this.setBlockType(blockIdx, BLOCK_MIXED);
+            this.masks.set(blockIdx,
+                bitIdx < 32 ? (SOLID_LO & ~(1 << bitIdx)) >>> 0 : SOLID_LO,
+                bitIdx >= 32 ? (SOLID_HI & ~(1 << (bitIdx - 32))) >>> 0 : SOLID_HI
+            );
+            return;
+        }
+
+        const s = this.masks.slot(blockIdx);
+        if (bitIdx < 32) {
+            this.masks.lo[s] = (this.masks.lo[s] & ~(1 << bitIdx)) >>> 0;
+        } else {
+            this.masks.hi[s] = (this.masks.hi[s] & ~(1 << (bitIdx - 32))) >>> 0;
+        }
+        if (this.masks.lo[s] === 0 && this.masks.hi[s] === 0) {
+            this.masks.removeAt(s);
+            this.setBlockType(blockIdx, BLOCK_EMPTY);
+        }
+    }
+
     orBlock(blockIdx: number, lo: number, hi: number): void {
         if (lo === 0 && hi === 0) return;
         const bt = this.getBlockType(blockIdx);
