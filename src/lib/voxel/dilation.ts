@@ -3,7 +3,8 @@ import {
     BLOCK_SOLID,
     SOLID_WORD,
     SparseVoxelGrid,
-    readBlockType
+    readBlockType,
+    writeBlockType
 } from './sparse-voxel-grid';
 import { GpuDilation } from '../gpu';
 import { logger } from '../utils';
@@ -218,9 +219,13 @@ function applyChunkToDst(
                 if (bt === 0) continue;  // EMPTY
 
                 const globalBlockIdx = baseGlobalIdx + bx;
-                const w = globalBlockIdx >>> 4;
-                const shift = (globalBlockIdx & 15) << 1;
-                dstTypes[w] |= bt << shift;
+                // writeBlockType clears the block's own 2-bit field before
+                // setting it. OR-ing is equivalent only while chunks are
+                // disjoint and the destination starts zeroed; if that stopped
+                // holding, SOLID (1) | MIXED (2) would give type 3, which
+                // getVoxel resolves to an absent mask and so reports the whole
+                // block as empty.
+                writeBlockType(dstTypes, globalBlockIdx, bt);
 
                 if (bt === 2) {  // MIXED
                     const m2 = innerIdx * 2;
