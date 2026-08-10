@@ -490,4 +490,81 @@ describe('CLI parsing', () => {
 
         assert.notStrictEqual(result.code, 0, 'CLI should reject a non-numeric angle');
     });
+
+    it('accepts --voxel-cleanup with a value', async () => {
+        const result = await runCli([
+            '--gpu', 'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--voxel-cleanup', '0.2',
+            'null'
+        ]);
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+    });
+
+    it('accepts a bare --voxel-cleanup without swallowing the output argument', async () => {
+        const result = await runCli([
+            '--gpu', 'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--voxel-cleanup',
+            'null'
+        ]);
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+    });
+
+    it('accepts --voxel-cleanup-fill none', async () => {
+        const result = await runCli([
+            '--gpu', 'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--voxel-cleanup', '0.2',
+            '--voxel-cleanup-fill', 'none',
+            'null'
+        ]);
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+    });
+
+    it('rejects an unknown --voxel-cleanup-fill value', async () => {
+        const result = await runCli([
+            '--gpu', 'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--voxel-cleanup', '0.2',
+            '--voxel-cleanup-fill', 'sideways',
+            'null'
+        ]);
+        assert.notStrictEqual(result.code, 0);
+        assert.match(result.stderr + result.stdout, /Invalid voxel cleanup fill mode/);
+    });
+
+    it('rejects a negative --voxel-cleanup', async () => {
+        const result = await runCli([
+            '--gpu', 'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--voxel-cleanup', '-1',
+            'null'
+        ]);
+        assert.notStrictEqual(result.code, 0);
+    });
+
+    it('errors on --voxel-cleanup-fill without --voxel-cleanup', async () => {
+        const result = await runCli([
+            '--gpu', 'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--voxel-cleanup-fill', 'grow',
+            'null'
+        ]);
+        assert.notStrictEqual(result.code, 0);
+        assert.match(result.stderr + result.stdout, /requires --voxel-cleanup/);
+    });
+
+    it('warns that --voxel-cleanup needs a voxel output', async () => {
+        // The null sink leaves outputFormat null, so the warning still fires
+        // without writing a file.
+        const result = await runCli([
+            '--gpu', 'cpu',
+            'test/fixtures/splat/minimal.splat',
+            '--voxel-cleanup', '0.2',
+            'null'
+        ]);
+        assert.strictEqual(result.code, 0, `CLI failed:\n${result.stderr}\n${result.stdout}`);
+        assert.match(result.stderr + result.stdout, /--voxel-cleanup has no effect/);
+    });
 });

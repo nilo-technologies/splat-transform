@@ -28,6 +28,7 @@ import {
     type FilterFloaters,
     type FilterCluster,
     type Options as LibOptions,
+    type CleanupFillMode,
     type CollisionMeshShape,
     type CollisionColorMode,
     type CollisionColorPalette,
@@ -143,6 +144,8 @@ const cliOptionsConfig = {
     'voxel-external-fill': { type: 'string' },
     'voxel-floor-fill': { type: 'string' },
     'voxel-carve': { type: 'string' },
+    'voxel-cleanup': { type: 'string' },
+    'voxel-cleanup-fill': { type: 'string' },
     'seed-pos': { type: 'string', default: '' },
     'collision-mesh': { type: 'string', short: 'K' },
     'collision-color': { type: 'string' },
@@ -195,6 +198,7 @@ const stringOptionNames = new Set(Object.entries(cliOptionsConfig)
 
 const isNumericValue = (s: string) => /^-?\d[\d.,e+-]*$/.test(s);
 const isCollisionMeshShape = (s: string) => /^(?:smooth|faces|voxel|tris)$/i.test(s);
+const isCleanupFillMode = (s: string) => /^(?:none|grow|close|both)$/i.test(s);
 
 // Options that may appear without a value. The predicate gates whether the
 // next argv token is consumed as the value; when omitted (or rejected) the
@@ -208,6 +212,8 @@ const optionalValueOptions: Map<string, OptionalValueValidator> = new Map([
     ['--voxel-external-fill', isNumericValue],
     ['--voxel-floor-fill', isNumericValue],
     ['--voxel-carve', isNumericValue],
+    ['--voxel-cleanup', isNumericValue],
+    ['--voxel-cleanup-fill', isCleanupFillMode],
     ['--voxel-params', isNumericValue],
     ['--collision-mesh', isCollisionMeshShape],
     ['-K', isCollisionMeshShape],
@@ -419,6 +425,30 @@ const parseArguments = async () => {
             navCapsule = { height: 1.6, radius: 0.2 };
         }
     }
+
+    const cleanupStr = v['voxel-cleanup'];
+    let voxelCleanup: number | undefined;
+    if (cleanupStr !== undefined) {
+        // Bare flag: two voxels is the scale that closes single-voxel sampling
+        // holes without bridging real gaps.
+        voxelCleanup = cleanupStr ? parseNumber(cleanupStr, 0) : voxelResolution * 2;
+    }
+
+    const cleanupFillStr = v['voxel-cleanup-fill'];
+    let voxelCleanupFill: CleanupFillMode | undefined;
+    if (cleanupFillStr !== undefined) {
+        if (voxelCleanup === undefined || voxelCleanup === 0) {
+            throw new Error(
+                '--voxel-cleanup-fill requires --voxel-cleanup with a value greater than 0.');
+        }
+        const normalized = cleanupFillStr.toLowerCase();
+        if (normalized !== 'none' && normalized !== 'grow' &&
+            normalized !== 'close' && normalized !== 'both') {
+            throw new Error(
+                `Invalid voxel cleanup fill mode: ${cleanupFillStr}. Expected none, grow, close or both.`);
+        }
+        voxelCleanupFill = normalized;
+    }
     let navSeed: { x: number; y: number; z: number };
     if (seedPosStr) {
         const [x, y, z] = parseVec(seedPosStr, 3);
@@ -613,6 +643,8 @@ const parseArguments = async () => {
         collisionVoxels,
         collisionVoxelsSize,
         autoRotate,
+        voxelCleanup,
+        voxelCleanupFill,
         renderProjection,
         renderCameraPosition,
         renderLookAt,
@@ -907,6 +939,12 @@ VOXEL OUTPUT (.voxel.json)
         --voxel-external-fill [size]        Fill exterior voxels via boundary flood fill (interior scenes). Default: 1.6
         --voxel-floor-fill [size]           Fill columns upward from bottom (exterior scenes). Default: 1.6
         --voxel-carve [h,r]                 Carve navigable space using capsule flood fill from seed. Default: 1.6,0.2
+        --voxel-cleanup    [size]           Fill sampling holes, flatten bumpy surfaces and drop floating
+                                            debris at this scale. Only voxels with gaussian density behind
+                                            them are ever added, so real gaps and openings survive.
+                                            Bare flag uses 2x the voxel size. Default: off
+        --voxel-cleanup-fill [none|grow|close|both]   Hole-filling algorithm for --voxel-cleanup. none runs
+                                            only the smoothing and debris passes. Default: grow
         --seed-pos         <x,y,z>          Seed position for voxel processing and --filter-cluster. Default: 0,0,0
     -K, --collision-mesh   [smooth|faces|voxel|tris]   Generate collision mesh (.collision.glb). voxel/tris add per-vertex colors. Default shape: smooth
         --collision-color    [average|solid]   Vertex color algorithm for voxel/tris collision meshes. solid snaps to the majority color instead of blending. Default: average
@@ -1178,6 +1216,10 @@ const main = async () => {
 
     if (options.autoRotate !== false && outputFormat !== 'voxel') {
         logger.warn('--auto-rotate has no effect without a .voxel.json output.');
+    }
+
+    if (options.voxelCleanup !== undefined && outputFormat !== 'voxel') {
+        logger.warn('--voxel-cleanup has no effect without a .voxel.json output.');
     }
 
     try {
