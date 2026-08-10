@@ -711,6 +711,20 @@ describe('growGrid', function () {
         assert.strictEqual(res.added, 0);
     });
 
+    it('reports gate-rejected voxels', function () {
+        const empty = new SparseVoxelGrid(8, 8, 8);
+        const res = growGrid(sheet(8, 4, [[4, 4]]), empty,
+            { minNeighbors: 3, maxIterations: 8 });
+        assert.strictEqual(res.gateRejected, 1,
+            'the hole was eligible but blocked, and must be counted once');
+    });
+
+    it('reports zero gate-rejected when everything is a candidate', function () {
+        const res = growGrid(sheet(8, 4, [[4, 4]]), allCandidate(8, 8, 8),
+            { minNeighbors: 3, maxIterations: 4 });
+        assert.strictEqual(res.gateRejected, 0);
+    });
+
     it('respects the candidate gate per voxel', function () {
         // Two 1x1 holes; only one is a candidate.
         const cand = new SparseVoxelGrid(12, 12, 12);
@@ -822,6 +836,12 @@ type GrowResult = {
     grid: SparseVoxelGrid;
     /** Voxels added across all passes. */
     added: number;
+    /**
+     * Voxels that met the neighbour threshold but were blocked by the candidate
+     * mask. The audit trail for the anti-fabrication guarantee: these are the
+     * voxels an ungated fill would have invented.
+     */
+    gateRejected: number;
     /** Passes actually run, including the final unproductive one. */
     iterations: number;
 };
@@ -907,6 +927,7 @@ const growGrid = (
 
     let current = grid;
     let added = 0;
+    let gateRejected = 0;
     let iterations = 0;
 
     for (let iter = 0; iter < maxIterations; iter++) {
@@ -952,10 +973,16 @@ const growGrid = (
                         hi2 |= c1Hi;
                     }
 
-                    const newLo =
-                        (~own[0] & cand[0] & atLeast(minNeighbors, lo0, lo1, lo2)) >>> 0;
-                    const newHi =
-                        (~own[1] & cand[1] & atLeast(minNeighbors, hi0, hi1, hi2)) >>> 0;
+                    const eligibleLo = (~own[0] & atLeast(minNeighbors, lo0, lo1, lo2)) >>> 0;
+                    const eligibleHi = (~own[1] & atLeast(minNeighbors, hi0, hi1, hi2)) >>> 0;
+                    const newLo = (eligibleLo & cand[0]) >>> 0;
+                    const newHi = (eligibleHi & cand[1]) >>> 0;
+                    // Counted only on the first pass: a voxel the gate blocks
+                    // stays eligible every pass, so summing would multiply it.
+                    if (iter === 0) {
+                        gateRejected += popcount((eligibleLo & ~cand[0]) >>> 0) +
+                            popcount((eligibleHi & ~cand[1]) >>> 0);
+                    }
                     if (newLo === 0 && newHi === 0) continue;
 
                     addedThisPass += popcount(newLo) + popcount(newHi);
@@ -973,7 +1000,7 @@ const growGrid = (
         current = next;
     }
 
-    return { grid: current, added, iterations };
+    return { grid: current, added, gateRejected, iterations };
 };
 
 export { growGrid, type GrowOptions, type GrowResult };
@@ -994,7 +1021,7 @@ Check `popcount`'s export before relying on it: it is imported by `block-cleanup
 npx tsx --test test/voxel-grow.test.mjs
 ```
 
-Expected: PASS, 18 tests (6 from Task 2 plus 12 here).
+Expected: PASS, 20 tests (6 from Task 2 plus 14 here).
 
 - [ ] **Step 5: Export from both barrels**
 
@@ -1177,6 +1204,7 @@ describe('majorityFilterGrid', function () {
         const res = majorityFilterGrid(g, empty, { threshold: 14, iterations: 1 });
         assert.strictEqual(res.grid.getVoxel(8, 8, 8), 0, 'gate must block the fill');
         assert.strictEqual(res.added, 0);
+        assert.ok(res.gateRejected >= 1, 'the blocked dent must be counted');
     });
 
     it('does not gate removals by the candidate mask', function () {
@@ -1299,6 +1327,11 @@ type MajorityResult = {
     added: number;
     /** Voxels turned off. */
     removed: number;
+    /**
+     * Voxels that reached the threshold but were blocked by the candidate mask.
+     * The audit trail for the anti-fabrication guarantee.
+     */
+    gateRejected: number;
 };
 
 /**
@@ -1330,6 +1363,7 @@ const majorityFilterGrid = (
     let current = grid;
     let added = 0;
     let removed = 0;
+    let gateRejected = 0;
 
     // Each pass reads the whole previous state, so passes are sequential and
     // every chunk of a pass sees the same input grid.
@@ -1426,6 +1460,8 @@ const majorityFilterGrid = (
                                     } else if (candidate.getVoxel(gx, gy, gz)) {
                                         next.setVoxel(gx, gy, gz);
                                         added++;
+                                    } else {
+                                        gateRejected++;
                                     }
                                 } else if (was) {
                                     removed++;
@@ -1441,7 +1477,7 @@ const majorityFilterGrid = (
         current = next;
     }
 
-    return { grid: current, added, removed };
+    return { grid: current, added, removed, gateRejected };
 };
 
 export { majorityFilterGrid, type MajorityOptions, type MajorityResult };
