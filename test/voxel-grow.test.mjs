@@ -9,6 +9,7 @@ import {
     NEIGHBOR_SCRATCH_LEN,
     sixNeighborMasks
 } from '../src/lib/voxel/block-neighbors.js';
+import { growGrid } from '../src/lib/voxel/grow.js';
 import {
     SOLID_HI,
     SOLID_LO,
@@ -151,5 +152,155 @@ describe('sixNeighborMasks', function () {
                 }
             }
         }
+    });
+});
+
+// A grid where every voxel is a candidate, for tests not exercising the gate.
+const allCandidate = (nx, ny, nz) => {
+    const g = new SparseVoxelGrid(nx, ny, nz);
+    for (let z = 0; z < nz; z++) {
+        for (let y = 0; y < ny; y++) {
+            for (let x = 0; x < nx; x++) g.setVoxel(x, y, z);
+        }
+    }
+    return g;
+};
+
+// A one-voxel-thick sheet at y === yPlane, with the listed (x,z) holes.
+const sheet = (n, yPlane, holes) => {
+    const g = new SparseVoxelGrid(n, n, n);
+    const isHole = new Set(holes.map(([x, z]) => `${x},${z}`));
+    for (let z = 0; z < n; z++) {
+        for (let x = 0; x < n; x++) {
+            if (!isHole.has(`${x},${z}`)) g.setVoxel(x, yPlane, z);
+        }
+    }
+    return g;
+};
+
+describe('growGrid', function () {
+    it('fills a 1x1 hole in a sheet in one iteration', function () {
+        const g = sheet(8, 4, [[4, 4]]);
+        const res = growGrid(g, allCandidate(8, 8, 8), { minNeighbors: 3, maxIterations: 4 });
+        assert.strictEqual(res.grid.getVoxel(4, 4, 4), 1);
+        assert.strictEqual(res.added, 1);
+    });
+
+    it('fills a 1x3 slit in exactly two iterations, not one', function () {
+        const holes = [[3, 4], [4, 4], [5, 4]];
+        const one = growGrid(sheet(12, 4, holes), allCandidate(12, 12, 12),
+            { minNeighbors: 3, maxIterations: 1 });
+        assert.strictEqual(one.grid.getVoxel(4, 4, 4), 0, 'middle needs a second pass');
+        assert.strictEqual(one.grid.getVoxel(3, 4, 4), 1, 'ends fill first');
+
+        const two = growGrid(sheet(12, 4, holes), allCandidate(12, 12, 12),
+            { minNeighbors: 3, maxIterations: 2 });
+        assert.strictEqual(two.grid.getVoxel(4, 4, 4), 1);
+        assert.strictEqual(two.added, 3);
+    });
+
+    it('never fills a 3x3 square hole, at any iteration count', function () {
+        const holes = [];
+        for (let x = 3; x <= 5; x++) {
+            for (let z = 3; z <= 5; z++) holes.push([x, z]);
+        }
+        const res = growGrid(sheet(12, 4, holes), allCandidate(12, 12, 12),
+            { minNeighbors: 3, maxIterations: 32 });
+        assert.strictEqual(res.grid.getVoxel(4, 4, 4), 0, 'centre must stay open');
+        assert.strictEqual(res.added, 0, 'nothing in a 3x3 hole reaches 3 neighbours');
+    });
+
+    it('does not grow outward from a flat sheet face', function () {
+        // A complete sheet: every voxel just above it has exactly 1 occupied
+        // neighbour, so nothing should be added anywhere.
+        const res = growGrid(sheet(8, 4, []), allCandidate(8, 8, 8),
+            { minNeighbors: 3, maxIterations: 4 });
+        assert.strictEqual(res.added, 0);
+    });
+
+    it('respects the candidate gate: an empty candidate adds nothing', function () {
+        const empty = new SparseVoxelGrid(8, 8, 8);
+        const res = growGrid(sheet(8, 4, [[4, 4]]), empty,
+            { minNeighbors: 3, maxIterations: 8 });
+        assert.strictEqual(res.grid.getVoxel(4, 4, 4), 0, 'gate must block the fill');
+        assert.strictEqual(res.added, 0);
+    });
+
+    it('reports gate-rejected voxels', function () {
+        const empty = new SparseVoxelGrid(8, 8, 8);
+        const res = growGrid(sheet(8, 4, [[4, 4]]), empty,
+            { minNeighbors: 3, maxIterations: 8 });
+        assert.strictEqual(res.gateRejected, 1,
+            'the hole was eligible but blocked, and must be counted once');
+    });
+
+    it('reports zero gate-rejected when everything is a candidate', function () {
+        const res = growGrid(sheet(8, 4, [[4, 4]]), allCandidate(8, 8, 8),
+            { minNeighbors: 3, maxIterations: 4 });
+        assert.strictEqual(res.gateRejected, 0);
+    });
+
+    it('respects the candidate gate per voxel', function () {
+        // Two 1x1 holes; only one is a candidate.
+        const cand = new SparseVoxelGrid(12, 12, 12);
+        cand.setVoxel(4, 4, 4);
+        const res = growGrid(sheet(12, 4, [[4, 4], [8, 8]]), cand,
+            { minNeighbors: 3, maxIterations: 4 });
+        assert.strictEqual(res.grid.getVoxel(4, 4, 4), 1);
+        assert.strictEqual(res.grid.getVoxel(8, 4, 8), 0);
+        assert.strictEqual(res.added, 1);
+    });
+
+    it('terminates early when an iteration adds nothing', function () {
+        const res = growGrid(sheet(8, 4, [[4, 4]]), allCandidate(8, 8, 8),
+            { minNeighbors: 3, maxIterations: 16 });
+        assert.strictEqual(res.iterations, 2,
+            'one productive pass plus one that adds nothing');
+    });
+
+    it('honours a higher minNeighbors', function () {
+        // A 1x1 hole in a sheet has 4 neighbours, so k=4 fills it but k=5 does not.
+        const four = growGrid(sheet(8, 4, [[4, 4]]), allCandidate(8, 8, 8),
+            { minNeighbors: 4, maxIterations: 4 });
+        assert.strictEqual(four.grid.getVoxel(4, 4, 4), 1);
+
+        const five = growGrid(sheet(8, 4, [[4, 4]]), allCandidate(8, 8, 8),
+            { minNeighbors: 5, maxIterations: 4 });
+        assert.strictEqual(five.grid.getVoxel(4, 4, 4), 0);
+    });
+
+    it('fills an interior void with 6 neighbours at k=6', function () {
+        // A 3x3x3 solid cube with its centre missing: the centre has all 6.
+        const g = new SparseVoxelGrid(8, 8, 8);
+        for (let z = 2; z <= 4; z++) {
+            for (let y = 2; y <= 4; y++) {
+                for (let x = 2; x <= 4; x++) {
+                    if (!(x === 3 && y === 3 && z === 3)) g.setVoxel(x, y, z);
+                }
+            }
+        }
+        const res = growGrid(g, allCandidate(8, 8, 8), { minNeighbors: 6, maxIterations: 2 });
+        assert.strictEqual(res.grid.getVoxel(3, 3, 3), 1);
+        assert.strictEqual(res.added, 1);
+    });
+
+    it('crosses block boundaries', function () {
+        // Hole at (4,4,4) sits at a block corner (blocks are 4^3), so its
+        // neighbours live in four different blocks.
+        const g = sheet(12, 4, [[4, 4]]);
+        const res = growGrid(g, allCandidate(12, 12, 12), { minNeighbors: 3, maxIterations: 4 });
+        assert.strictEqual(res.grid.getVoxel(4, 4, 4), 1);
+    });
+
+    it('leaves the candidate grid untouched', function () {
+        const cand = allCandidate(8, 8, 8);
+        const before = [...cand.types];
+        growGrid(sheet(8, 4, [[4, 4]]), cand, { minNeighbors: 3, maxIterations: 4 });
+        assert.deepStrictEqual([...cand.types], before);
+    });
+
+    it('defaults to minNeighbors 3 and maxIterations 4', function () {
+        const res = growGrid(sheet(8, 4, [[4, 4]]), allCandidate(8, 8, 8));
+        assert.strictEqual(res.grid.getVoxel(4, 4, 4), 1);
     });
 });
