@@ -8,9 +8,18 @@ import assert from 'node:assert';
 import { MAX_GRID_BLOCKS, assertGridFits } from '../src/lib/voxel/grid-limits.js';
 
 describe('assertGridFits', function () {
-    it('accepts a grid at the limit', function () {
-        // 512^3 = 134217728 blocks, comfortably inside
+    it('accepts a grid well inside the limit', function () {
+        // 512^3 = 134217728 blocks
         assert.doesNotThrow(() => assertGridFits(512, 512, 512, 0.01));
+    });
+
+    it('rejects exactly at the boundary', function () {
+        // pins the strict >: MAX_GRID_BLOCKS itself passes, one block over fails
+        assert.doesNotThrow(() => assertGridFits(MAX_GRID_BLOCKS, 1, 1, 0.01));
+        assert.throws(
+            () => assertGridFits(MAX_GRID_BLOCKS + 1, 1, 1, 0.01),
+            /too large/
+        );
     });
 
     it('accepts a realistic large scene', function () {
