@@ -145,9 +145,10 @@ normals by `dataTable.transform.rotation` alone, but under a non-uniform scale
 (for example `--scale 1,2,1`) true engine-space normals follow the
 inverse-transpose of the linear part, so both the normal directions and the
 `s_mid * s_max` area term skew. In practice the effect is bounded — a skewed
-vote distribution raises `cost(theta*)` and so tends to trip the 2% guard rather
-than bake a wrong yaw — and `autoRotate` accepts an explicit angle to bypass
-estimation entirely. Handling non-uniform scale properly is out of scope.
+vote distribution flattens the cost curve and so lowers the measured
+`improvement`, tending to trip the 2% guard rather than bake a wrong yaw — and
+`autoRotate` accepts an explicit angle to bypass estimation entirely. Handling
+non-uniform scale properly is out of scope.
 
 ### Cost function
 
@@ -193,8 +194,9 @@ at multiples of 90 and maximum `sqrt(2)` at 45, so the ceiling on improvement is
 
 `improvement = 1 - cost(bin_min) / cost(0)`, where `bin_min` is the argmin bin
 rather than the sub-bin `theta*` from the parabolic fit. The parabolic fit refines
-the reported angle but not the reported saving, which is therefore very slightly
-conservative — `cost(theta*) <= cost(bin_min)`. When `improvement < minImprovement`
+the reported angle but not the reported saving. Since the fitted parabola's vertex
+value lies at or below `cost(bin_min)` by construction, the reported saving is
+conservative with respect to the fit. When `improvement < minImprovement`
 (default 0.02), or when no gaussian was eligible, the result is `yawDegrees: 0`
 with a `reason` string: nothing is rotated, no metadata is written, `.vox` comes
 out exactly as today. This is what keeps an organic scene from acquiring a
