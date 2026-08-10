@@ -91,12 +91,12 @@ export type { Projection, RenderCamera, CameraBasis } from './render';
 
 // Voxel
 export {
-    alignGridBounds, applyAlignYaw, carve, estimateAlignYaw, fillExterior, fillFloor,
-    filterAndFillBlocks, filterCluster, filterFloaters, findClusterVoxelFlood, growGrid,
-    majorityFilterGrid, voxelizeToBuffer,
+    alignGridBounds, applyAlignYaw, carve, despeckleGrid, estimateAlignYaw, fillExterior,
+    fillFloor, filterAndFillBlocks, filterCluster, filterFloaters, findClusterVoxelFlood,
+    growGrid, majorityFilterGrid, voxelizeToBuffer,
     BlockMaskBuffer, SparseVoxelGrid, BLOCK_EMPTY, BLOCK_MIXED, BLOCK_SOLID
 } from './voxel';
-export type { AlignYawApplied, AlignYawOptions, AlignYawResult, GrowOptions, GrowResult, MajorityOptions, MajorityResult, NavSeed, NavSimplifyResult, UpAxis } from './voxel';
+export type { AlignYawApplied, AlignYawOptions, AlignYawResult, DespeckleOptions, DespeckleResult, GrowOptions, GrowResult, MajorityOptions, MajorityResult, NavSeed, NavSimplifyResult, UpAxis } from './voxel';
 
 // Types
 export type { CollisionMeshShape, CollisionColorMode, CollisionColorPalette, Options, Param, DeviceCreator } from './types';

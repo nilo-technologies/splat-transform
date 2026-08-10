@@ -17,3 +17,5 @@ export { growGrid } from './grow';
 export type { GrowOptions, GrowResult } from './grow';
 export { majorityFilterGrid } from './majority';
 export type { MajorityOptions, MajorityResult } from './majority';
+export { despeckleGrid } from './despeckle';
+export type { DespeckleOptions, DespeckleResult } from './despeckle';
