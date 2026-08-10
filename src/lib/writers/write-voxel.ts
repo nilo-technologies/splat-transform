@@ -17,6 +17,7 @@ import { buildSparseOctree, type SparseOctree } from './sparse-octree';
 import {
     filterAndFillBlocks,
     alignGridBounds,
+    assertGridFits,
     carve,
     fillExterior,
     fillFloor,
@@ -555,6 +556,17 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
         let gridBounds = alignGridBounds(
             bounds.min.x - padXZ, bounds.min.y - padY, bounds.min.z - padXZ,
             bounds.max.x + padXZ, bounds.max.y + padY, bounds.max.z + padXZ,
+            voxelResolution
+        );
+
+        // Reject oversized grids before any GPU work: past the block-index
+        // ceiling the sparse grid drops surface masks silently, so failing here
+        // with an actionable message beats producing a hollowed-out result.
+        const blockSize = 4 * voxelResolution;
+        assertGridFits(
+            Math.round((gridBounds.max.x - gridBounds.min.x) / blockSize),
+            Math.round((gridBounds.max.y - gridBounds.min.y) / blockSize),
+            Math.round((gridBounds.max.z - gridBounds.min.z) / blockSize),
             voxelResolution
         );
 

@@ -1,5 +1,6 @@
 export { filterAndFillBlocks } from './block-cleanup';
 export { BlockMaskBuffer } from './block-mask-buffer';
+export { MAX_GRID_BLOCKS, assertGridFits } from './grid-limits';
 export {
     BLOCK_EMPTY, BLOCK_MIXED, BLOCK_SOLID, SparseVoxelGrid, readBlockType, writeBlockType
 } from './sparse-voxel-grid';
