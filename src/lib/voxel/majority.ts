@@ -13,6 +13,14 @@ type MajorityOptions = {
      * chunks in tests; the result is identical either way. Default: 256
      */
     chunkInner?: number;
+    /**
+     * Occupied face-adjacent neighbours that spare an under-threshold voxel from
+     * removal. A voxel on a 1-voxel-thick sheet has at most 4, all in-plane, so
+     * 3 keeps sheet interiors and straight edges while still shaving bumps (1),
+     * scatter (0-2) and stick tips (2). Out-of-grid neighbours count as empty.
+     * Set 0 to remove on the density test alone. Default: 3
+     */
+    keepFaceNeighbors?: number;
 };
 
 /**
@@ -26,6 +34,12 @@ type MajorityResult = {
     /** Voxels turned off. */
     removed: number;
     /**
+     * Voxels under `threshold` that the face-neighbour gate spared: exactly the
+     * set a density-only filter would have deleted. Accumulates over
+     * `iterations`, as `added` and `removed` do.
+     */
+    kept: number;
+    /**
      * Voxels that reached the threshold but were blocked by the candidate mask.
      * The audit trail for the anti-fabrication guarantee.
      */
@@ -35,10 +49,15 @@ type MajorityResult = {
 /**
  * Regularize a voxel surface with a 3x3x3 majority filter.
  *
- * A voxel ends up occupied when at least `threshold` of the 27 voxels in its
- * neighbourhood — itself included — are occupied. Turning a voxel **on** also
- * requires it to be set in `candidate`; turning one **off** does not, since
- * removal cannot fabricate structure.
+ * A voxel stays occupied when at least `threshold` of the 27 voxels in its
+ * neighbourhood — itself included — are occupied, **or** when it has at least
+ * `keepFaceNeighbors` occupied face-adjacent neighbours. The second clause is
+ * what keeps thin surfaces: a 1-voxel-thick sheet can never reach a threshold
+ * above 9, so a density-only rule deletes sheets rather than smoothing them,
+ * and rounds the convex edges off solid volumes for the same reason.
+ *
+ * Turning a voxel **on** requires it to be set in `candidate`; turning one
+ * **off** does not, since removal cannot fabricate structure.
  *
  * Counting is separable, so each pass is three linear sweeps (X then Z then Y)
  * over a dense chunk rather than 27 taps per voxel. Chunks carry a halo equal to
@@ -56,12 +75,13 @@ const majorityFilterGrid = (
     candidate: SparseVoxelGrid,
     options: MajorityOptions = {}
 ): MajorityResult => {
-    const { threshold = 14, iterations = 2, chunkInner = 256 } = options;
+    const { threshold = 14, iterations = 2, chunkInner = 256, keepFaceNeighbors = 3 } = options;
     const { nx, ny, nz } = grid;
 
     let current = grid;
     let added = 0;
     let removed = 0;
+    let kept = 0;
     let gateRejected = 0;
 
     // Each pass reads the whole previous state, so passes are sequential and
@@ -163,7 +183,31 @@ const majorityFilterGrid = (
                                         gateRejected++;
                                     }
                                 } else if (was) {
-                                    removed++;
+                                    // Sheet-aware removal. `src` is the pre-pass
+                                    // snapshot the density count came from, so
+                                    // both tests see identical state, and halo=1
+                                    // puts all six neighbours of every inner
+                                    // voxel inside this buffer. A neighbour
+                                    // outside it is out-of-grid — the outer
+                                    // region is only clamped at the grid
+                                    // boundary — and counts as empty, matching
+                                    // the density count's convention.
+                                    let faceCount = 0;
+                                    if (x > 0 && src[base + x - 1]) faceCount++;
+                                    if (x + 1 < ow && src[base + x + 1]) faceCount++;
+                                    if (y > 0 && src[base + x - ow]) faceCount++;
+                                    if (y + 1 < oh && src[base + x + ow]) faceCount++;
+                                    if (z > 0 && src[base + x - zStride]) faceCount++;
+                                    if (z + 1 < od && src[base + x + zStride]) faceCount++;
+                                    if (faceCount >= keepFaceNeighbors) {
+                                        // Must write: `next` starts empty, so a
+                                        // removal is expressed by not writing.
+                                        // Counting alone would drop the voxel.
+                                        next.setVoxel(gx, gy, gz);
+                                        kept++;
+                                    } else {
+                                        removed++;
+                                    }
                                 }
                             }
                         }
@@ -176,7 +220,7 @@ const majorityFilterGrid = (
         current = next;
     }
 
-    return { grid: current, added, removed, gateRejected };
+    return { grid: current, added, removed, kept, gateRejected };
 };
 
 export { majorityFilterGrid, type MajorityOptions, type MajorityResult };
