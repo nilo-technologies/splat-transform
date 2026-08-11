@@ -216,9 +216,10 @@ New cases:
   the thing keeping the guarantee.
 
 Unchanged and expected to still pass: the isolated-voxel and 1-voxel-bump removals, the dent
-fill, the candidate-gate tests, and the untouched-candidate test. The two chunk-equivalence tests
-keep their assertions and gain one line each: `kept` must match across chunk sizes too, since it
-is per-voxel derived state and would expose a halo mistake that `added` and `removed` could miss.
+fill, the candidate-gate tests, and the untouched-candidate test. The chunk-equivalence test
+(`:109-140`) keeps its assertions and gains one line: `kept` must match across chunk sizes too,
+since it is per-voxel derived state and would expose a halo mistake that `added` and `removed`
+could miss.
 
 The risk flagged in review — "iterates: two passes differ from one on a noisy volume"
 (`:142-171`), where the 0.6-density block has a mean face-neighbour count of 3.6 and most voxels
