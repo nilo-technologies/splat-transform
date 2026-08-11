@@ -94,7 +94,8 @@ export {
     alignGridBounds, applyAlignYaw, carve, cleanupGrid, cleanupRadius, despeckleGrid,
     estimateAlignYaw, fillExterior, fillFloor, filterAndFillBlocks, filterCluster,
     filterFloaters, findClusterVoxelFlood, growGrid, majorityFilterGrid, voxelizeToBuffer,
-    BlockMaskBuffer, SparseVoxelGrid, BLOCK_EMPTY, BLOCK_MIXED, BLOCK_SOLID, CANDIDATE_CUTOFF
+    BlockMaskBuffer, SparseVoxelGrid, BLOCK_EMPTY, BLOCK_MIXED, BLOCK_SOLID, CANDIDATE_CUTOFF,
+    MAJORITY_KEEP_FACE_NEIGHBORS
 } from './voxel';
 export type { AlignYawApplied, AlignYawOptions, AlignYawResult, CleanupFillMode, CleanupOptions, CleanupResult, CleanupStats, DespeckleOptions, DespeckleResult, GrowOptions, GrowResult, MajorityOptions, MajorityResult, NavSeed, NavSimplifyResult, UpAxis } from './voxel';
 

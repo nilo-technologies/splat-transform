@@ -25,12 +25,10 @@ const countVoxels = (g) => {
 };
 
 // A thick slab (y in [y0,y1]) spanning the grid's XZ interior, with full-depth
-// column holes at the listed (x,z) positions. Deliberately NOT a single-Y-layer
-// sheet: cleanupGrid always runs the majority filter at the real production
-// threshold (14 of 27), and a single-voxel-thick sheet can never reach that --
-// its Y+-1 neighbours are always empty, capping every position at 9 of 27 -- so
-// a thin sheet gets erased wholesale by majority regardless of what grow does.
-// A slab several voxels thick lets positions well inside it reach threshold.
+// column holes at the listed (x,z) positions. Thickness is what makes the
+// majority filter's density test reachable here: a 1-voxel-thick sheet caps out
+// at 9 of 27 and only survives via the face-neighbour gate, which
+// 'keeps a 1-thick sheet with holes end to end' below covers separately.
 const slab = (n, y0, y1, holes) => {
     const g = new SparseVoxelGrid(n, n, n);
     const isHole = new Set(holes.map(([x, z]) => `${x},${z}`));
@@ -147,6 +145,73 @@ describe('cleanupGrid', function () {
             { strength: 0.2, voxelResolution: 0.1, fill: 'grow' });
         assert.ok(countVoxels(res.grid) < before, 'specks should be gone');
         assert.strictEqual(res.stats.components, 1, 'only the slab should remain');
+    });
+
+    it('reports the thin-surface voxels it spared', function () {
+        // The slab's full-extent edge columns are under the majority threshold
+        // and spared by the face-neighbour gate, so the counter must be live and
+        // non-zero on ordinary input.
+        const n = 24;
+        const res = cleanupGrid(slab(n, 4, 11, []), allCandidate(n),
+            { strength: 0.2, voxelResolution: 0.1, fill: 'grow' });
+        assert.ok(res.stats.majorityKept > 0,
+            'kept must be surfaced in the stats, not swallowed');
+    });
+
+    it('keeps a 1-thick sheet with holes end to end', function () {
+        // 20x20 sheet at y=8 with three 1-voxel holes. grow fills them (each has
+        // 4 occupied face neighbours), majority keeps the surface and bevels its
+        // 4 corners by 3 voxels each over 2 passes, despeckle keeps it as one
+        // 388-voxel component. Under the old rule the sheet was erased outright.
+        const n = 24;
+        const g = new SparseVoxelGrid(n, n, n);
+        for (let z = 2; z <= 21; z++) {
+            for (let x = 2; x <= 21; x++) g.setVoxel(x, 8, z);
+        }
+        for (const [x, z] of [[8, 8], [12, 15], [15, 9]]) g.clearVoxel(x, 8, z);
+        const res = cleanupGrid(g, allCandidate(n),
+            { strength: 0.2, voxelResolution: 0.1, fill: 'grow' });
+        assert.strictEqual(res.grid.getVoxel(8, 8, 8), 1, 'hole filled');
+        assert.strictEqual(res.grid.getVoxel(11, 8, 11), 1, 'sheet interior alive');
+        assert.strictEqual(res.grid.getVoxel(2, 8, 11), 1, 'straight edge alive');
+        assert.strictEqual(res.stats.components, 1, 'one surface, not debris');
+        assert.strictEqual(countVoxels(res.grid), 388, '400 less 3 voxels per corner');
+        assert.ok(res.stats.majorityKept > 0);
+    });
+
+    it('still drops a small floating blob', function () {
+        // A solid 3x3x3 blob survives majority now -- its corners have 3 face
+        // neighbours -- so despeckle is what removes it, at 27 < 64 voxels.
+        const n = 24;
+        const g = new SparseVoxelGrid(n, n, n);
+        for (let z = 10; z <= 12; z++) {
+            for (let y = 10; y <= 12; y++) {
+                for (let x = 10; x <= 12; x++) g.setVoxel(x, y, z);
+            }
+        }
+        const res = cleanupGrid(g, allCandidate(n),
+            { strength: 0.2, voxelResolution: 0.1, fill: 'grow' });
+        assert.strictEqual(countVoxels(res.grid), 0, 'the blob must go');
+        assert.strictEqual(res.stats.componentsRemoved, 1);
+    });
+
+    it('keeps a blob at the despeckle threshold, documenting the interaction', function () {
+        // A solid 4x4x4 blob is exactly DESPECKLE_MIN_VOXELS, so it survives.
+        // Under the old rule majority eroded it to 8 voxels first and despeckle
+        // then dropped it. The size threshold now carries this alone: if real
+        // scenes show surviving blobs, DESPECKLE_MIN_VOXELS is the dial, not
+        // keepFaceNeighbors.
+        const n = 24;
+        const g = new SparseVoxelGrid(n, n, n);
+        for (let z = 10; z <= 13; z++) {
+            for (let y = 10; y <= 13; y++) {
+                for (let x = 10; x <= 13; x++) g.setVoxel(x, y, z);
+            }
+        }
+        const res = cleanupGrid(g, allCandidate(n),
+            { strength: 0.2, voxelResolution: 0.1, fill: 'grow' });
+        assert.strictEqual(countVoxels(res.grid), 64);
+        assert.strictEqual(res.stats.componentsRemoved, 0);
     });
 
     it('rejects a non-positive strength', function () {

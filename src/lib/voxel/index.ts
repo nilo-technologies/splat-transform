@@ -19,5 +19,5 @@ export { majorityFilterGrid } from './majority';
 export type { MajorityOptions, MajorityResult } from './majority';
 export { despeckleGrid } from './despeckle';
 export type { DespeckleOptions, DespeckleResult } from './despeckle';
-export { CANDIDATE_CUTOFF, cleanupGrid, cleanupRadius } from './cleanup';
+export { CANDIDATE_CUTOFF, MAJORITY_KEEP_FACE_NEIGHBORS, cleanupGrid, cleanupRadius } from './cleanup';
 export type { CleanupFillMode, CleanupOptions, CleanupResult, CleanupStats } from './cleanup';

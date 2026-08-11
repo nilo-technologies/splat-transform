@@ -20,6 +20,13 @@ const MAJORITY_THRESHOLD = 14;
 /** Majority filter passes. */
 const MAJORITY_ITERATIONS = 2;
 
+/**
+ * Occupied face neighbours that spare an under-threshold voxel from the majority
+ * filter. A 1-voxel-thick sheet tops out at 4, so 3 keeps sheets and solid
+ * convex edges whole while still shaving bumps, scatter and stick tips.
+ */
+const MAJORITY_KEEP_FACE_NEIGHBORS = 3;
+
 /** Components below this many voxels are removed. 64 is one 4x4x4 block. */
 const DESPECKLE_MIN_VOXELS = 64;
 
@@ -66,6 +73,12 @@ type CleanupStats = {
     majorityAdded: number;
     /** Voxels removed by the majority filter. */
     majorityRemoved: number;
+    /**
+     * Voxels the majority filter spared for being part of a thin surface: what a
+     * density-only filter would have deleted. Large on scenes with genuine
+     * 1-voxel-thick structure such as roof decks and fences.
+     */
+    majorityKept: number;
     /** Voxels removed by despeckling. */
     despeckled: number;
     /** Connected components found while despeckling. */
@@ -155,7 +168,8 @@ const cleanupGrid = (
 
     const maj = majorityFilterGrid(current, candidate, {
         threshold: MAJORITY_THRESHOLD,
-        iterations: MAJORITY_ITERATIONS
+        iterations: MAJORITY_ITERATIONS,
+        keepFaceNeighbors: MAJORITY_KEEP_FACE_NEIGHBORS
     });
     current = maj.grid;
     gateRejected += maj.gateRejected;
@@ -171,6 +185,7 @@ const cleanupGrid = (
             gateRejected,
             majorityAdded: maj.added,
             majorityRemoved: maj.removed,
+            majorityKept: maj.kept,
             despeckled: desp.removed,
             components: desp.components,
             componentsRemoved: desp.componentsRemoved
@@ -180,6 +195,7 @@ const cleanupGrid = (
 
 export {
     CANDIDATE_CUTOFF,
+    MAJORITY_KEEP_FACE_NEIGHBORS,
     cleanupGrid,
     cleanupRadius,
     type CleanupFillMode,
