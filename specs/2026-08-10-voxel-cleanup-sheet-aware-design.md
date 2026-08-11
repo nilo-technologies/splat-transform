@@ -2,7 +2,8 @@
 
 Addendum to `specs/2026-08-10-voxel-cleanup-design.md`, amending **Stage 2 — `majority`**. The
 rest of that design — the candidate mask, the anti-fabrication guarantee, `grow`, `despeckle`,
-the dial mapping, the pipeline placement — stands unchanged.
+the dial mapping, the pipeline placement — is unchanged in code. One consequence reaches
+`despeckle`'s *role* without touching its implementation, and is recorded below.
 
 ## Problem
 
@@ -92,6 +93,10 @@ decision loop that already folds the Y pass (`src/lib/voxel/majority.ts:139-170`
 
 - `src` is the pre-pass snapshot, the same buffer `count` is derived from, so the face test and
   the density test see identical state.
+- The retained voxel must be **written**: today's `else if (was) { removed++; }` branch only
+  counts, since `next` starts empty and a removal is expressed by not writing. The gate turns
+  that branch into `next.setVoxel(gx, gy, gz); kept++`. Without the write, retention silently
+  does nothing.
 - The existing `halo = 1` already covers all six face neighbours of every inner voxel, so
   chunk-size independence is preserved and the existing equivalence test keeps its meaning.
 - A neighbour outside the outer buffer is out-of-grid — with `halo = 1` the outer region is
@@ -103,9 +108,25 @@ the small minority of voxels that are removal candidates today.
 
 `MajorityResult` gains `kept`: voxels that were under threshold but survived the face-neighbour
 gate. This is the audit counter for the change — it is exactly the set of voxels the old filter
-would have deleted. It is non-zero for any structure with convex edges, thin or solid: 144 for a
-full-extent slab on a 16^3 grid, 56 for an interior solid 6^3 cube (its 12 edges and 8 corners),
-252 for a 1-thick 16x16 floor sheet.
+would have deleted. Like `added` and `removed` it **accumulates over passes**, so a two-pass run
+on a shape that keeps re-presenting the same candidates reports double the single-pass figure
+(an interior solid 6^3 cube: 56 at `iterations: 1`, 112 at 2). Single-pass figures for reference:
+144 for a full-extent slab on a 16^3 grid, 56 for that cube (its 12 edges and 8 corners), 252 for
+a 1-thick 16x16 floor sheet.
+
+### Interaction with `despeckle`
+
+Retaining chunky structure means `majority` no longer pre-shrinks small floating islands, so
+`despeckle` becomes their only backstop. A free-floating solid 4x4x4 blob is eroded 64 -> 8 by
+two of today's passes and then dropped by `despeckle` at `DESPECKLE_MIN_VOXELS = 64`; under the
+new rule it stays at 64 (its corners have 3 face neighbours) and, being exactly at the threshold
+rather than below it, survives the pipeline.
+
+This is consistent with the intent — the same property that keeps a real 4^3 detail is the one
+that keeps a 4^3 blob — but it means the size threshold now does this work alone, where it
+previously inherited a partly-eroded input. `DESPECKLE_MIN_VOXELS` stays at 64; a 3^3 blob (27
+voxels) is still removed. If real scenes show surviving small blobs, the dial to turn is
+`DESPECKLE_MIN_VOXELS`, not `keepFaceNeighbors`.
 
 ### Wiring
 
@@ -113,6 +134,10 @@ full-extent slab on a 16^3 grid, 56 for an interior solid 6^3 cube (its 12 edges
   `CleanupStats` gains `majorityKept`.
 - `src/lib/writers/write-voxel.ts:726` — the cleanup log line reports the kept count alongside
   `+added/-removed`.
+- JSDoc, per AGENTS.md, since `MajorityOptions` and `MajorityResult` are both public
+  (`src/lib/index.ts:99`): the new `keepFaceNeighbors` and `kept` members get doc comments, and
+  `majorityFilterGrid`'s own description — which currently states the removal rule as pure
+  density (`majority.ts:38-41`) — is corrected, as is `CleanupStats.majorityKept`.
 
 No structural change to the pipeline: stage order, the `grow` / `close` / `both` / `none` modes
 and the dial mapping are all as the parent design specifies.
@@ -142,7 +167,8 @@ Stated plainly. The numbers below are measured on a dense reference implementati
 
 ## Test plan
 
-`test/voxel-majority.test.mjs`. Three existing sites change, six cases are added.
+Four existing sites change — three in `test/voxel-majority.test.mjs`, one in
+`test/voxel-cleanup.test.mjs` — and six cases are added.
 
 Inverted pins. All expected values below are measured against a dense reference implementation
 of the rule, so the tests encode observed behaviour rather than predicted behaviour:
@@ -159,6 +185,11 @@ of the rule, so the tests encode observed behaviour rather than predicted behavi
 - `:62-74` "preserves the interior of a thick slab" keeps every assertion but its comment is now
   wrong — it explains that full-extent edge columns "DO erode". Correct the comment; do not
   weaken the test.
+- `test/voxel-cleanup.test.mjs:27-33` — the `slab` helper's comment justifies avoiding a thin
+  sheet because "a thin sheet gets erased wholesale by majority regardless of what grow does",
+  which is precisely the behaviour being inverted. The helper stays (its column holes are still
+  what those tests need) but the rationale must be rewritten, and the new end-to-end sheet case
+  below lives in this same file.
 
 The out-of-grid-as-empty convention still needs a pin, and moves to the addition path, which
 this change does not touch: a dent cleared at the grid corner of a slab is **not** filled (its
@@ -177,17 +208,22 @@ New cases:
 - A 1x1x3 stick attached to a slab is removed entirely in one pass.
 - An interior solid 6x6x6 cube is preserved exactly (216 voxels, `removed === 0`) through two
   passes, where today it erodes to 136. Pins the stop-rounding-solids effect.
-- `kept` counts the retained removal candidates: 56 for that cube, and 0 for a lone isolated
-  voxel (which reports `removed === 1`), so the audit counter is exercised in both directions.
+- `kept` counts the retained removal candidates, asserted on a **single** pass since the counter
+  accumulates: 56 for that cube at `iterations: 1` (112 at 2), and 0 for a lone isolated voxel,
+  which reports `removed === 1`. Exercises the audit counter in both directions.
+- A free-floating solid 3x3x3 blob is still removed end-to-end by `cleanupGrid`, while a 4x4x4
+  one now survives. Pins the `despeckle` interaction above, including that the size threshold is
+  the thing keeping the guarantee.
 
 Unchanged and expected to still pass: the isolated-voxel and 1-voxel-bump removals, the dent
-fill, the candidate-gate tests, the untouched-candidate test, and both chunk-equivalence tests.
+fill, the candidate-gate tests, and the untouched-candidate test. The two chunk-equivalence tests
+keep their assertions and gain one line each: `kept` must match across chunk sizes too, since it
+is per-voxel derived state and would expose a halo mistake that `added` and `removed` could miss.
 
-One existing test carries empirical risk: "iterates: two passes differ from one on a noisy
-volume" (`:142-171`) compares voxel counts across pass counts on a 0.6-density random block,
-where the mean face-neighbour count is 3.6, so most voxels are now retained. The assertion is
-expected to hold — additions still differ between passes — but it must be run, and if the two
-counts converge the test needs a different discriminator rather than a relaxed assertion.
+The risk flagged in review — "iterates: two passes differ from one on a noisy volume"
+(`:142-171`), where the 0.6-density block has a mean face-neighbour count of 3.6 and most voxels
+are now retained — has been checked and holds: 3028 voxels after one pass against 3119 after two.
+Additions still differ between passes. No new discriminator is needed and the test is left alone.
 
 ## Landing order
 
@@ -216,4 +252,6 @@ compare the wrong baseline.
 - Freezing gate-kept voxels across passes to stop the corner bevel advancing. Needs another
   grid of state, and would also protect scatter that a later pass could legitimately remove.
   Revisit only if corner loss shows up in the rooftops measurement.
-- Any change to `grow`, `despeckle`, the candidate mask, or the dial mapping.
+- Any change to `grow`, the candidate mask, or the dial mapping. `despeckle` keeps
+  `DESPECKLE_MIN_VOXELS = 64` as well; the interaction noted above is a consequence to observe on
+  real scenes, not a reason to retune the threshold pre-emptively.
