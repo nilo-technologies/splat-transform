@@ -77,6 +77,8 @@ type CleanupStats = {
      * Voxels the majority filter spared for being part of a thin surface: what a
      * density-only filter would have deleted. Large on scenes with genuine
      * 1-voxel-thick structure such as roof decks and fences.
+     * Accumulates over the filter's passes, like `majorityAdded` and
+     * `majorityRemoved`, so it counts sparings rather than distinct voxels.
      */
     majorityKept: number;
     /** Voxels removed by despeckling. */
