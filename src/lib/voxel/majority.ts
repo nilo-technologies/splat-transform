@@ -18,7 +18,8 @@ type MajorityOptions = {
      * removal. A voxel on a 1-voxel-thick sheet has at most 4, all in-plane, so
      * 3 keeps sheet interiors and straight edges while still shaving bumps (1),
      * scatter (0-2) and stick tips (2). Out-of-grid neighbours count as empty.
-     * Set 0 to remove on the density test alone. Default: 3
+     * Above 6 — no voxel has more than 6 face neighbours — removal falls back
+     * to the density test alone; 0 spares every occupied voxel. Default: 3
      */
     keepFaceNeighbors?: number;
 };
@@ -66,9 +67,9 @@ type MajorityResult = {
  *
  * @param grid - Grid to filter. **Consumed**: do not reuse it after the call.
  * @param candidate - Voxels permitted to be turned on. Not modified.
- * @param options - Threshold, pass count and chunk size.
- * @returns The filtered grid with counts of voxels added, removed, and blocked
- * by the candidate gate.
+ * @param options - Threshold, pass count, chunk size and face-neighbour threshold.
+ * @returns The filtered grid with counts of voxels added, removed, kept by the
+ * face-neighbour gate, and blocked by the candidate gate.
  */
 const majorityFilterGrid = (
     grid: SparseVoxelGrid,
