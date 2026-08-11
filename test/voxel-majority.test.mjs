@@ -35,6 +35,26 @@ const slab = (n, y0, y1) => {
     return g;
 };
 
+// A 1-voxel-thick sheet at height y, spanning [x0,x1] x [z0,z1].
+const sheet = (n, y, x0, x1, z0, z1) => {
+    const g = new SparseVoxelGrid(n, n, n);
+    for (let z = z0; z <= z1; z++) {
+        for (let x = x0; x <= x1; x++) g.setVoxel(x, y, z);
+    }
+    return g;
+};
+
+// A solid axis-aligned box, inclusive bounds.
+const box = (n, x0, x1, y0, y1, z0, z1) => {
+    const g = new SparseVoxelGrid(n, n, n);
+    for (let z = z0; z <= z1; z++) {
+        for (let y = y0; y <= y1; y++) {
+            for (let x = x0; x <= x1; x++) g.setVoxel(x, y, z);
+        }
+    }
+    return g;
+};
+
 describe('majorityFilterGrid', function () {
     it('removes an isolated voxel', function () {
         const g = new SparseVoxelGrid(16, 16, 16);
@@ -140,6 +160,8 @@ describe('majorityFilterGrid', function () {
             'chunked result must equal single-chunk result');
         assert.strictEqual(small.added, big.added);
         assert.strictEqual(small.removed, big.removed);
+        assert.strictEqual(small.kept, big.kept,
+            'the face taps must read the halo, not the chunk edge');
     });
 
     it('iterates: two passes differ from one on a noisy volume', function () {
@@ -171,6 +193,100 @@ describe('majorityFilterGrid', function () {
         const two = majorityFilterGrid(build(), allCandidate(24),
             { threshold: 14, iterations: 2 });
         assert.notStrictEqual(countVoxels(one.grid), countVoxels(two.grid));
+    });
+
+    it('keeps an interior 1-thick sheet, bevelling only its corners', function () {
+        // A 10x10 sheet well inside the grid: 100 voxels, of which the 4 convex
+        // corners have 2 face neighbours and go. The bevel then advances one
+        // diagonal per pass, because each removal exposes two new 2-neighbour
+        // voxels, so the loss per corner is 1 after one pass and 3 after two.
+        const one = majorityFilterGrid(sheet(16, 8, 3, 12, 3, 12), allCandidate(16),
+            { threshold: 14, iterations: 1 });
+        assert.strictEqual(countVoxels(one.grid), 96, '100 less 1 voxel per corner');
+        for (const [x, z] of [[3, 3], [12, 3], [3, 12], [12, 12]]) {
+            assert.strictEqual(one.grid.getVoxel(x, 8, z), 0, `corner ${x},${z}`);
+        }
+        assert.strictEqual(one.grid.getVoxel(3, 8, 8), 1, 'straight edge stays');
+        assert.strictEqual(one.grid.getVoxel(8, 8, 8), 1, 'interior stays');
+
+        const two = majorityFilterGrid(sheet(16, 8, 3, 12, 3, 12), allCandidate(16),
+            { threshold: 14, iterations: 2 });
+        assert.strictEqual(countVoxels(two.grid), 88, '3 voxels per corner after two passes');
+        assert.strictEqual(two.grid.getVoxel(3, 8, 8), 1, 'straight edges never erode');
+    });
+
+    it('preserves a solid interior cube exactly', function () {
+        // Today's rule rounds this to 136 over two passes: a convex edge sees 12
+        // of 27 and a corner 8, both under threshold. With the gate, an edge has
+        // 4 face neighbours and a corner 3, so the cube is untouched.
+        const res = majorityFilterGrid(box(16, 5, 10, 5, 10, 5, 10), allCandidate(16),
+            { threshold: 14, iterations: 2 });
+        assert.strictEqual(countVoxels(res.grid), 216);
+        assert.strictEqual(res.removed, 0);
+        assert.strictEqual(res.grid.getVoxel(5, 5, 5), 1, 'corner');
+        assert.strictEqual(res.grid.getVoxel(5, 8, 5), 1, 'edge');
+    });
+
+    it('audits the voxels it spared', function () {
+        // `kept` accumulates over passes, like added and removed: the cube
+        // presents the same 8 corners and 48 edge voxels to every pass.
+        const one = majorityFilterGrid(box(16, 5, 10, 5, 10, 5, 10), allCandidate(16),
+            { threshold: 14, iterations: 1 });
+        assert.strictEqual(one.kept, 56, '8 corners + 48 edge voxels');
+        const two = majorityFilterGrid(box(16, 5, 10, 5, 10, 5, 10), allCandidate(16),
+            { threshold: 14, iterations: 2 });
+        assert.strictEqual(two.kept, 112, 'per-pass counter, summed over 2 passes');
+
+        const slabRes = majorityFilterGrid(slab(16, 4, 11), allCandidate(16),
+            { threshold: 14, iterations: 1 });
+        assert.strictEqual(slabRes.kept, 144, 'the full-extent slab edge columns');
+    });
+
+    it('reports nothing kept when there is nothing to spare', function () {
+        const g = new SparseVoxelGrid(16, 16, 16);
+        g.setVoxel(8, 8, 8);
+        const res = majorityFilterGrid(g, allCandidate(16), { threshold: 14, iterations: 1 });
+        assert.strictEqual(res.kept, 0, '0 face neighbours is not a surface');
+        assert.strictEqual(res.removed, 1);
+    });
+
+    it('keeps a 2x2 bump patch on a slab: the documented tradeoff', function () {
+        // Each of the four voxels has 2 in-plane neighbours plus the slab below
+        // = 3, so the patch survives where a single-voxel bump does not. This is
+        // the price of keeping 1-thick sheets and it is intended: do not "fix"
+        // it without re-reading the design spec's tradeoffs section.
+        const g = slab(16, 6, 9);
+        for (const [x, z] of [[6, 6], [7, 6], [6, 7], [7, 7]]) g.setVoxel(x, 10, z);
+        const res = majorityFilterGrid(g, allCandidate(16), { threshold: 14, iterations: 2 });
+        for (const [x, z] of [[6, 6], [7, 6], [6, 7], [7, 7]]) {
+            assert.strictEqual(res.grid.getVoxel(x, 10, z), 1, `patch voxel ${x},${z}`);
+        }
+    });
+
+    it('still shaves a stick off a slab', function () {
+        // A 1x1x3 stick: the tip has 1 face neighbour and the shaft 2, so the
+        // whole thing goes in one pass. Poles and railings are not protected.
+        const g = slab(16, 6, 9);
+        for (let y = 10; y <= 12; y++) g.setVoxel(6, y, 6);
+        const res = majorityFilterGrid(g, allCandidate(16), { threshold: 14, iterations: 1 });
+        for (let y = 10; y <= 12; y++) {
+            assert.strictEqual(res.grid.getVoxel(6, y, 6), 0, `stick voxel y=${y}`);
+        }
+        assert.strictEqual(res.grid.getVoxel(6, 9, 6), 1, 'the slab top stays');
+    });
+
+    it('treats out-of-grid as empty when adding', function () {
+        // The convention the old erosion pin carried, moved to the addition
+        // path, which this change does not touch. A dent at the grid corner sees
+        // 11 of 27 -- two axes lose a third to out-of-grid and the dent itself
+        // is empty -- so it stays open, while an interior dent at 26 fills.
+        const g = slab(16, 4, 11);
+        g.clearVoxel(0, 8, 0);
+        g.clearVoxel(8, 8, 8);
+        const res = majorityFilterGrid(g, allCandidate(16), { threshold: 14, iterations: 1 });
+        assert.strictEqual(res.grid.getVoxel(0, 8, 0), 0, 'grid-corner dent stays open');
+        assert.strictEqual(res.grid.getVoxel(8, 8, 8), 1, 'interior dent fills');
+        assert.strictEqual(res.added, 1, 'exactly the interior dent');
     });
 
     it('leaves the candidate grid untouched', function () {
