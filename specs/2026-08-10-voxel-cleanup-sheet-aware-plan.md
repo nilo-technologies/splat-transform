@@ -697,7 +697,7 @@ Replace the `smoothed` line with two lines so the kept count reads as part of sm
 Run:
 
 ```bash
-npx tsx src/cli/index.ts ./scenes/cabin.spz \
+node bin/cli.mjs ./scenes/cabin.spz \
   --voxel-params 0.1,0.1 \
   --voxel-cleanup 0.2 \
   -w /tmp/cabin-cleanup.voxel.json 2>&1 | grep -A1 "cleanup:"
@@ -1277,10 +1277,26 @@ This task produces the honest numbers. The README's table was measured on `urban
 four columns move with this change. Both rows are re-measured with the same tool so they stay
 comparable to each other.
 
+- [ ] **Step 0: Build, so the CLI actually runs**
+
+`src/cli/index.ts` only *exports* `main` — nothing invokes it (`src/cli/index.ts:1366`,
+`bin/cli.mjs`). Running that module directly, as `npx tsx src/cli/index.ts <args>`, imports it and
+exits 0 having done nothing, which looks like a pass and produces no output. Task 4 hit exactly
+that. Build first and drive the real entry point:
+
+```bash
+npm run build
+node bin/cli.mjs --help | head -3
+```
+
+Expected: the build exits 0, and `--help` prints the version banner with the current commit hash.
+Every CLI invocation below uses `node bin/cli.mjs`. If you change source after building, rebuild
+before re-measuring.
+
 - [ ] **Step 1: Measure the baseline, without cleanup**
 
 ```bash
-npx tsx src/cli/index.ts ./scenes/urban.spz \
+node bin/cli.mjs ./scenes/urban.spz \
   --filter-box -20,-20,-20,20,20,20 \
   --voxel-params 0.1,0.1 \
   --auto-rotate -w \
@@ -1292,7 +1308,7 @@ Record the `surface coherence` line.
 - [ ] **Step 2: Measure with cleanup**
 
 ```bash
-npx tsx src/cli/index.ts ./scenes/urban.spz \
+node bin/cli.mjs ./scenes/urban.spz \
   --filter-box -20,-20,-20,20,20,20 \
   --voxel-params 0.1,0.1 \
   --voxel-cleanup 0.2 \
@@ -1338,7 +1354,7 @@ The measurement above says nothing about whether roof planes look right. Run the
 use:
 
 ```bash
-npx tsx src/cli/index.ts ./scenes/rooftops.spz \
+node bin/cli.mjs ./scenes/rooftops.spz \
   --voxel-params 0.1,0.1 \
   --voxel-cleanup 0.2 \
   --collision-voxels /tmp/rooftops-cleaned.vox \
