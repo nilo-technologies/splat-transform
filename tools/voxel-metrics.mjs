@@ -122,6 +122,17 @@ const decodeVoxelFiles = async (jsonPath) => {
     const bin = await readFile(binPath);
     const words = new Uint32Array(bin.buffer, bin.byteOffset, bin.byteLength >> 2);
 
+    // subarray clamps silently, so a stale or truncated .bin beside a newer
+    // .json would decode fewer voxels and report a plausible but wrong row.
+    const expectedWords = meta.nodeCount + meta.leafDataCount;
+    if (words.length !== expectedWords) {
+        throw new Error(
+            `${binPath} holds ${words.length} u32 words, but ${basename(jsonPath)} describes ` +
+            `${expectedWords} (nodeCount ${meta.nodeCount} + leafDataCount ${meta.leafDataCount}). ` +
+            'The pair is mismatched -- re-export the scene.'
+        );
+    }
+
     const nodes = words.subarray(0, meta.nodeCount);
     const leafData = words.subarray(meta.nodeCount, meta.nodeCount + meta.leafDataCount);
 
