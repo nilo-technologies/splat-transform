@@ -296,3 +296,42 @@ compare the wrong baseline.
 - Any change to `grow`, the candidate mask, or the dial mapping. `despeckle` keeps
   `DESPECKLE_MIN_VOXELS = 64` as well; the interaction noted above is a consequence to observe on
   real scenes, not a reason to retune the threshold pre-emptively.
+
+## Follow-ups left open
+
+Recorded from the implementation's task and whole-branch reviews. Nothing here blocked the change;
+the first item is the only one that gates trusting it on real geometry.
+
+**Needs a human.** Visual confirmation on the rooftops capture that roof planes and walls read as
+present rather than perforated, and that convex corners read as chamfered rather than broken. The
+synthetic pins bound the cost at 3 voxels per convex corner at `iterations = 2`, which is small
+enough to accept on the numbers, but no one has looked at real geometry. Produce the artifact with
+the command in the plan's Task 6 Step 6.
+
+**Worth deciding before the `close` work.** `GROW_MIN_NEIGHBORS` and
+`MAJORITY_KEEP_FACE_NEIGHBORS` are both 3, so they are the same predicate and the majority filter
+can no longer trim what `grow` added on its first pass (see Measured outcome above). Two questions
+follow: whether the two constants should differ so the filter stays a check on the fill, and
+whether `maxIterations: 2 * radius + 2` is still the right bound for `grow` now that nothing
+downstream trims it. Both affect how `close` should be tuned, so they are better answered before
+that work than after.
+
+**Smaller items.**
+
+- The `despeckle` pair (27-voxel and 64-voxel blobs) brackets `DESPECKLE_MIN_VOXELS` loosely —
+  changing it to 28 still passes. A 63-voxel component as the removed case would pin the boundary.
+- `MAJORITY_KEEP_FACE_NEIGHBORS` is exported from `src/lib/index.ts` while its four sibling
+  constants in `cleanup.ts` are not, and nothing in-tree consumes it. Export the set or none.
+- `tools/voxel-metrics.mjs`: the main guard matches on `endsWith('voxel-metrics.mjs')`, which also
+  fires for a differently-named file that ends the same way, and the `Uint32Array` view over the
+  read buffer assumes Node's pool alignment.
+- `npm run lint` covers `src` only, so neither `tools/` nor `test/` is linted; the files added here
+  carry style findings (mostly missing JSDoc tags) that the gate never sees.
+- The CLI test for the rejected fill modes asserts exit code and message correctly, but its
+  "did not voxelize" assertion is inert because the run it uses would not voxelize either way.
+  Pointing it at a real `.voxel.json` output would make it bite.
+- `write-voxel.ts` still describes the fill modes as "none, grow, close or both" in one message,
+  which predates `close` and `both` being rejected at parse time.
+- The README table omits `faces/vox` (3.55 to 4.69 across the two runs) deliberately, to keep the
+  table to five columns. It is the second-clearest evidence of the redistribution after the
+  scattered share, if the table ever earns another column.
