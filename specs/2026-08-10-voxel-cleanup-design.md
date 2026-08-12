@@ -9,6 +9,12 @@ Voxelizing `scenes/urban.spz` at `--voxel-params 0.1,0.1` produces a structure r
 holes and violently bumpy surfaces. Measured on that scene, grid 464x428x500, after the
 current pipeline:
 
+> **These figures predate sheet-aware removal** and the crop they were taken on is not recoverable
+> from them, so they are not comparable with anything measured since. The metric definitions here
+> are also not the ones now in use. For measured, reproducible numbers see
+> `specs/2026-08-10-voxel-cleanup-sheet-aware-design.md`, "Measured outcome", and compute your own
+> with `tools/voxel-metrics.mjs`.
+
 | metric | value |
 | --- | --- |
 | occupied voxels | 288,184 |
@@ -97,6 +103,14 @@ Comparing the last two rows against the ungated third row: the guarantee costs 6
 against 47, and roughness 3.33 against 3.18 — that is, almost nothing. The gated pipeline also
 ends *below* the baseline voxel count, so it removes noise rather than adding bulk; no
 thickening is involved.
+
+> **This table predates sheet-aware removal.** Its baseline crop is not recoverable from the
+> numbers and its roughness definition is not the one now in use, so none of these values can be
+> compared with a current run. The "ends below the baseline voxel count" conclusion no longer
+> holds either: measured after sheet-aware removal the cleaned count came out 1.1% *above*
+> baseline, because `GROW_MIN_NEIGHBORS` and `MAJORITY_KEEP_FACE_NEIGHBORS` became the same
+> predicate. See `specs/2026-08-10-voxel-cleanup-sheet-aware-design.md`, "Measured outcome", and
+> `tools/voxel-metrics.mjs` for re-deriving any of this.
 
 ### User-facing surface
 

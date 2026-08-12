@@ -22,15 +22,31 @@ const MAJORITY_ITERATIONS = 2;
 
 /**
  * Occupied face neighbours that spare an under-threshold voxel from the majority
- * filter. A 1-voxel-thick sheet tops out at 4, so 3 keeps sheets and solid
- * convex edges whole while still shaving bumps, scatter and stick tips.
+ * filter. A 1-voxel-thick sheet tops out at 4, so 3 keeps sheet interiors,
+ * straight edges and solid convex edges while still shaving bumps, scatter and
+ * stick tips.
+ *
+ * Currently equal to {@link GROW_MIN_NEIGHBORS}; see the coupling note there.
  */
 const MAJORITY_KEEP_FACE_NEIGHBORS = 3;
 
 /** Components below this many voxels are removed. 64 is one 4x4x4 block. */
 const DESPECKLE_MIN_VOXELS = 64;
 
-/** Face neighbours a candidate voxel needs before `grow` fills it. */
+/**
+ * Face neighbours a candidate voxel needs before `grow` fills it.
+ *
+ * Equal to {@link MAJORITY_KEEP_FACE_NEIGHBORS}, which makes the two the same
+ * predicate: every voxel `grow` adds has at least 3 occupied face neighbours by
+ * construction, and `grow` never removes any, so the majority filter's first
+ * pass cannot remove a grown voxel. Only the second pass can, and only where a
+ * neighbour disappeared meanwhile. The majority filter has therefore stopped
+ * acting as a check on `grow` over-filling: measured on the rooftops capture the
+ * cleaned voxel count came out 1.1% *above* the no-cleanup baseline, where the
+ * design predicted at or below it. The two decouple only if the keep gate rises
+ * above this value, or this value falls below it. See
+ * `specs/2026-08-10-voxel-cleanup-sheet-aware-design.md`, "Measured outcome".
+ */
 const GROW_MIN_NEIGHBORS = 3;
 
 /**

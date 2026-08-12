@@ -160,7 +160,8 @@ Stated plainly. The numbers below are measured on a dense reference implementati
   in-plane neighbours plus 1 into the surface below = 3. Shell roughness on `urban.spz` may
   therefore measure slightly *worse* than the parent design's 3.33 voxels. Retaining a real
   1-thick roof is worth more than removing a 2x2 pimple, but the number should be reported
-  honestly, not hidden.
+  honestly, not hidden. **Untestable as stated** — see "Measured outcome" below: the 3.33 came
+  from a metric definition that is not recoverable, so there is nothing to compare against.
 - **Poles and sticks are still shaved**, exactly as today: a 1x1x3 stick on a slab is removed
   entirely in one pass. Thin vertical members — railings, antennae, lamp posts — have 2 face
   neighbours and are not protected by this change. If they matter, that is separate work.
@@ -225,6 +226,45 @@ The risk flagged in review — "iterates: two passes differ from one on a noisy 
 (`:142-171`), where the 0.6-density block has a mean face-neighbour count of 3.6 and most voxels
 are now retained — has been checked and holds: 3028 voxels after one pass against 3119 after two.
 Additions still differ between passes. No new discriminator is needed and the test is left alone.
+
+## Measured outcome
+
+Measured after landing, on the city rooftop capture cropped to a 40 m box at 10 cm
+(`--filter-box -20,-20,-20,20,20,20 --voxel-params 0.1,0.1 --auto-rotate`, the cleaned row adding
+`--voxel-cleanup 0.2`), with all columns computed by `tools/voxel-metrics.mjs`:
+
+| | occupied | islands | in largest | scattered | roughness |
+| --- | --- | --- | --- | --- | --- |
+| without cleanup | 324,997 | 11,349 | 67.8% | 27.5% | 2.35 |
+| `--voxel-cleanup 0.2` | 328,717 | 112 | 84.0% | 2.1% | 1.43 |
+
+Islands, connectivity, scatter and roughness all moved as intended, and by large margins. One
+number went the other way from the prediction: **occupied voxels rose 1.1%**, where the parent
+design's guarantee was that the gated pipeline ends at or below the baseline count ("it removes
+noise rather than adding bulk"). Neither this design nor the parent anticipated that.
+
+The mechanism is a coincidence of two constants that this change created:
+`GROW_MIN_NEIGHBORS = 3` (`cleanup.ts:34`) and `MAJORITY_KEEP_FACE_NEIGHBORS = 3`
+(`cleanup.ts:28`) are now **the same predicate**. Every voxel `grow` adds has at least 3 occupied
+face neighbours by construction, and `grow` never removes a voxel, so each of its additions
+satisfies the majority filter's keep gate. The filter's first pass therefore cannot remove
+anything `grow` added; only the second pass can, and only where a neighbour disappeared in the
+first. The majority filter has stopped acting as a check on `grow` over-filling — which is
+precisely the role the parent design's measurement table gave it, since the `grow k>=3` row there
+(370,539 voxels) only came back under baseline after majority and despeckle ran (202,947).
+
+This is a real coupling, not a bug: the retained voxels are on genuine surfaces, and every one of
+them is still density-gated, so the anti-fabrication guarantee is untouched. But the "ends below
+baseline" claim no longer follows from the pipeline's structure and should not be restated. The
+two constants decouple only if the keep gate rises above `GROW_MIN_NEIGHBORS`, or that falls below
+the keep gate; both are retuning decisions that need their own measurement.
+
+The Tradeoffs prediction that roughness would come out "slightly worse than 3.33 voxels" is
+**untestable**, not confirmed or refuted. The 3.33 figure comes from the parent design's table,
+whose metric definition and scene crop were not recorded and cannot be reconstructed from the
+numbers; `tools/voxel-metrics.mjs` computes its own roughness definition, so 1.43 and 3.33 are not
+comparable quantities. This is the reason the tool exists and the reason the README states the
+command with its table.
 
 ## Landing order
 
