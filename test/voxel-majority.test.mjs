@@ -129,6 +129,24 @@ describe('majorityFilterGrid', function () {
         assert.strictEqual(res.removed, 1);
     });
 
+    it('does not gate retention by the candidate mask', function () {
+        // The side the anti-fabrication guarantee actually rests on: additions
+        // are gated, removals and retentions are not. A real thin surface must
+        // therefore survive even where the candidate grid is empty -- otherwise
+        // a mask that failed to cover an existing surface would erase it.
+        const noCandidate = majorityFilterGrid(sheet(16, 8, 3, 12, 3, 12),
+            new SparseVoxelGrid(16, 16, 16), { threshold: 14, iterations: 1 });
+        const allowAll = majorityFilterGrid(sheet(16, 8, 3, 12, 3, 12), allCandidate(16),
+            { threshold: 14, iterations: 1 });
+
+        assert.strictEqual(noCandidate.grid.getVoxel(8, 8, 8), 1, 'the sheet must survive');
+        assert.strictEqual(countVoxels(noCandidate.grid), countVoxels(allowAll.grid),
+            'retention must not depend on the candidate mask');
+        assert.strictEqual(noCandidate.added, 0, 'an empty mask can add nothing');
+        assert.strictEqual(noCandidate.kept, allowAll.kept,
+            'the same voxels are spared either way');
+    });
+
     it('produces the same result whatever the chunk size', function () {
         const build = () => {
             const g = new SparseVoxelGrid(32, 32, 32);
@@ -216,15 +234,35 @@ describe('majorityFilterGrid', function () {
     });
 
     it('preserves a solid interior cube exactly', function () {
-        // Today's rule rounds this to 136 over two passes: a convex edge sees 12
-        // of 27 and a corner 8, both under threshold. With the gate, an edge has
-        // 4 face neighbours and a corner 3, so the cube is untouched.
+        // The superseded density-only rule rounded this to 136 over two passes: a
+        // convex edge sees 12 of 27 and a corner 8, both under threshold. With the
+        // gate, an edge has 4 face neighbours and a corner 3, so the cube is
+        // untouched.
         const res = majorityFilterGrid(box(16, 5, 10, 5, 10, 5, 10), allCandidate(16),
             { threshold: 14, iterations: 2 });
         assert.strictEqual(countVoxels(res.grid), 216);
         assert.strictEqual(res.removed, 0);
         assert.strictEqual(res.grid.getVoxel(5, 5, 5), 1, 'corner');
         assert.strictEqual(res.grid.getVoxel(5, 8, 5), 1, 'edge');
+    });
+
+    it('falls back to density-only removal above 6 face neighbours', function () {
+        // No voxel has more than 6 face neighbours, so a `keepFaceNeighbors`
+        // above 6 can never fire and the superseded density-only rule is
+        // restored. This is the documented escape hatch, and the migration path
+        // for anyone who wants the old behaviour back.
+        const sheetRes = majorityFilterGrid(sheet(16, 8, 3, 12, 3, 12), allCandidate(16),
+            { threshold: 14, iterations: 1, keepFaceNeighbors: 7 });
+        assert.strictEqual(countVoxels(sheetRes.grid), 0,
+            'a 1-thick interior sheet is erased outright in one pass');
+        assert.strictEqual(sheetRes.removed, 100, 'all 100 sheet voxels removed');
+        assert.strictEqual(sheetRes.kept, 0, 'the gate spares nothing');
+
+        const cubeRes = majorityFilterGrid(box(16, 5, 10, 5, 10, 5, 10), allCandidate(16),
+            { threshold: 14, iterations: 2, keepFaceNeighbors: 7 });
+        assert.strictEqual(countVoxels(cubeRes.grid), 136,
+            'a solid 6x6x6 cube rounds off to 136 over two passes');
+        assert.strictEqual(cubeRes.kept, 0);
     });
 
     it('audits the voxels it spared', function () {
