@@ -724,7 +724,7 @@ const writeVoxel = async (options: WriteVoxelOptions, fs: FileSystem): Promise<v
             logger.info(
                 `cleanup: radius ${s.radius} voxels, +${fmtCount(s.grown)} grown, ` +
                 `+${fmtCount(s.majorityAdded)}/-${fmtCount(s.majorityRemoved)} smoothed ` +
-                `(${fmtCount(s.majorityKept)} thin-surface voxels kept), ` +
+                `(${fmtCount(s.majorityKept)} thin-surface sparings), ` +
                 `-${fmtCount(s.despeckled)} despeckled ` +
                 `(${fmtCount(s.componentsRemoved)} of ${fmtCount(s.components)} islands)`);
             logger.info(
