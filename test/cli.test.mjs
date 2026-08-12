@@ -534,6 +534,28 @@ describe('CLI parsing', () => {
         assert.match(result.stderr + result.stdout, /Invalid voxel cleanup fill mode/);
     });
 
+    for (const mode of ['close', 'both']) {
+        it(`rejects the unimplemented --voxel-cleanup-fill ${mode} before voxelizing`, async () => {
+            // These parse as modes but the library throws on them, which used to
+            // surface only after the whole voxelization had run. Failing at parse
+            // time means no work is wasted, so the run must not reach the
+            // voxelizer's own log output.
+            const result = await runCli([
+                '--gpu', 'cpu',
+                'test/fixtures/splat/minimal.splat',
+                '--voxel-cleanup', '0.2',
+                '--voxel-cleanup-fill', mode,
+                'null'
+            ]);
+            assert.notStrictEqual(result.code, 0);
+            const out = result.stderr + result.stdout;
+            assert.match(out, new RegExp(`"${mode}" is not implemented yet`));
+            assert.match(out, /Expected none or grow/);
+            assert.doesNotMatch(out, /Voxelizing|Cleanup/,
+                'must fail before any voxelization work');
+        });
+    }
+
     it('rejects a negative --voxel-cleanup', async () => {
         const result = await runCli([
             '--gpu', 'cpu',

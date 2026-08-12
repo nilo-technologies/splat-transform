@@ -198,6 +198,9 @@ const stringOptionNames = new Set(Object.entries(cliOptionsConfig)
 
 const isNumericValue = (s: string) => /^-?\d[\d.,e+-]*$/.test(s);
 const isCollisionMeshShape = (s: string) => /^(?:smooth|faces|voxel|tris)$/i.test(s);
+// Still matches the unimplemented `close` and `both`, so that they are consumed
+// as the flag's value and rejected by name rather than left as a stray
+// positional argument.
 const isCleanupFillMode = (s: string) => /^(?:none|grow|close|both)$/i.test(s);
 
 // Options that may appear without a value. The predicate gates whether the
@@ -442,10 +445,15 @@ const parseArguments = async () => {
                 '--voxel-cleanup-fill requires --voxel-cleanup with a value greater than 0.');
         }
         const normalized = cleanupFillStr.toLowerCase();
-        if (normalized !== 'none' && normalized !== 'grow' &&
-            normalized !== 'close' && normalized !== 'both') {
+        if (normalized === 'close' || normalized === 'both') {
+            // Rejected here rather than in cleanupGrid, which only sees the mode
+            // after voxelization has already run -- minutes on a real scene.
             throw new Error(
-                `Invalid voxel cleanup fill mode: ${cleanupFillStr}. Expected none, grow, close or both.`);
+                `Voxel cleanup fill mode "${normalized}" is not implemented yet. Expected none or grow.`);
+        }
+        if (normalized !== 'none' && normalized !== 'grow') {
+            throw new Error(
+                `Invalid voxel cleanup fill mode: ${cleanupFillStr}. Expected none or grow.`);
         }
         voxelCleanupFill = normalized;
     }
@@ -944,7 +952,8 @@ VOXEL OUTPUT (.voxel.json)
                                             them are ever added, so real gaps and openings survive.
                                             Bare flag uses 2x the voxel size. Default: off
         --voxel-cleanup-fill [none|grow|close|both]   Hole-filling algorithm for --voxel-cleanup. none runs
-                                            only the smoothing and debris passes. Default: grow
+                                            only the smoothing and debris passes. close and both are not
+                                            implemented yet and are rejected. Default: grow
         --seed-pos         <x,y,z>          Seed position for voxel processing and --filter-cluster. Default: 0,0,0
     -K, --collision-mesh   [smooth|faces|voxel|tris]   Generate collision mesh (.collision.glb). voxel/tris add per-vertex colors. Default shape: smooth
         --collision-color    [average|solid]   Vertex color algorithm for voxel/tris collision meshes. solid snaps to the majority color instead of blending. Default: average
