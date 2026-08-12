@@ -223,7 +223,8 @@ Apply when writing `.voxel.json` (sparse voxel octree for collision detection). 
                                           Bare flag uses 2x the voxel size. Default: off
     --voxel-cleanup-fill [none|grow|close|both]
                                           Hole-filling algorithm for --voxel-cleanup. none runs only
-                                          the smoothing and debris passes. Default: grow
+                                          the smoothing and debris passes. close and both are not
+                                          implemented yet and are rejected. Default: grow
     --seed-pos         <x,y,z>          Seed position for voxel fill/carve and --filter-cluster.
                                           Default: 0,0,0
 -K, --collision-mesh   [smooth|faces|voxel|tris]
@@ -308,8 +309,7 @@ window opening, a real gap between a railing and a deck, or a real void inside a
 density and is untouchable at any scale. Morphological closing on its own would fabricate: in an
 earlier prototype on this same capture — a separate experiment, not a row in the table below — an
 ungated close at radius 2 put 139,610 of the 305,608 voxels it added, 45.7%, in effective vacuum,
-where the gated pipeline places none. `--voxel-cleanup-fill close` is listed above but currently
-errors as unimplemented; when it lands it will be gated the same way.
+where the gated pipeline places none.
 
 On a city rooftop capture cropped to a 40 m box at 10 cm (52x35x50 m of occupied grid after
 auto-rotate):
@@ -325,10 +325,12 @@ here: hole filling and scatter removal roughly cancel, so cleanup moves voxels o
 than adding bulk, and every addition is density-gated (41.9K were blocked on this scene for having
 none behind them).
 
-Measured with `tools/voxel-metrics.mjs`. The scattered column is the same quantity the CLI reports
-as `surface coherence`; roughness is that tool's own definition, the mean deviation of each column's
-topmost voxel from its neighbours' — so compare the rows against each other rather than against
-figures from elsewhere.
+Both rows were produced with `--filter-box -20,-20,-20,20,20,20 --voxel-params 0.1,0.1 --auto-rotate`,
+the second adding `--voxel-cleanup 0.2`, and every column is computed by `tools/voxel-metrics.mjs`
+from the resulting `.voxel.json`. The scattered column is the same quantity the CLI reports as
+`surface coherence`; roughness is that tool's own definition, the mean deviation of each column's
+topmost voxel from its neighbours'. The table is an internal comparison — read the rows against
+each other rather than against figures from elsewhere.
 
 ```bash
 splat-transform city.spz city.voxel.json --voxel-params 0.1,0.1 --voxel-cleanup 0.2
@@ -336,7 +338,8 @@ splat-transform city.spz city.voxel.json --voxel-params 0.1,0.1 --voxel-cleanup 
 
 Pass roughly twice the voxel size to start. A bare `--voxel-cleanup` does exactly that.
 `--voxel-cleanup-fill none` skips hole filling and runs only the smoothing and debris passes, for
-scenes whose coverage is already good.
+scenes whose coverage is already good. The `close` and `both` modes are listed but not implemented:
+the CLI rejects them as it parses the flag, before any voxelization runs.
 
 The log reports surface coherence before cleanup, and suggests the flag when a grid is mostly
 scatter, so you can tell whether a scene needs it.
