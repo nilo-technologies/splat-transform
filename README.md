@@ -305,25 +305,30 @@ thin poles are still shaved off.
 Crucially, **every voxel it adds must have gaussian density behind it.** The cleanup samples the
 same field a second time at a far lower opacity threshold and uses that as a mask, so a real
 window opening, a real gap between a railing and a deck, or a real void inside a building has no
-density and is untouchable at any scale. Morphological closing on its own would fabricate: on the
-scene below, an ungated close at the same radius placed ~140,000 voxels in effective vacuum, 46%
-of everything it added. The gated pipeline places none.
+density and is untouchable at any scale. Morphological closing on its own would fabricate: in an
+earlier prototype on this same capture — a separate experiment, not a row in the table below — an
+ungated close at radius 2 put 139,610 of the 305,608 voxels it added, 45.7%, in effective vacuum,
+where the gated pipeline places none. `--voxel-cleanup-fill close` is listed above but currently
+errors as unimplemented; when it lands it will be gated the same way.
 
 On a city rooftop capture cropped to a 40 m box at 10 cm (52x35x50 m of occupied grid after
 auto-rotate):
 
-| | occupied voxels | disconnected islands | in the largest | surface roughness |
-| --- | --- | --- | --- | --- |
-| without | 324,997 | 11,349 | 67.8% | 2.35 voxels |
-| `--voxel-cleanup 0.2` | 328,717 | 112 | 84.0% | 1.43 voxels |
+| | occupied voxels | disconnected islands | in the largest | scattered (<= 2 of 6 neighbours) | surface roughness |
+| --- | --- | --- | --- | --- | --- |
+| without | 324,997 | 11,349 | 67.8% | 27.5% | 2.35 voxels |
+| `--voxel-cleanup 0.2` | 328,717 | 112 | 84.0% | 2.1% | 1.43 voxels |
 
-Note the voxel count barely moves — +1.1% here: hole filling and scatter removal roughly cancel, so
-cleanup redistributes voxels onto surfaces rather than adding bulk, and every addition is
-density-gated (41.9K were blocked on this scene for having none behind them).
+The scattered share is where the redistribution shows: a thirteenfold drop, with mean occupied face
+neighbours rising 3.55 to 4.69 over the same two runs. Note the voxel count barely moves — +1.1%
+here: hole filling and scatter removal roughly cancel, so cleanup moves voxels onto surfaces rather
+than adding bulk, and every addition is density-gated (41.9K were blocked on this scene for having
+none behind them).
 
-Measured with `tools/voxel-metrics.mjs`, which defines roughness as the mean deviation of each
-column's topmost voxel from its neighbours' — compare the rows against each other rather than
-against figures from elsewhere.
+Measured with `tools/voxel-metrics.mjs`. The scattered column is the same quantity the CLI reports
+as `surface coherence`; roughness is that tool's own definition, the mean deviation of each column's
+topmost voxel from its neighbours' — so compare the rows against each other rather than against
+figures from elsewhere.
 
 ```bash
 splat-transform city.spz city.voxel.json --voxel-params 0.1,0.1 --voxel-cleanup 0.2
