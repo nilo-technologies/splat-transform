@@ -296,7 +296,11 @@ full of holes, and violently bumpy. `--voxel-cleanup` fixes both, because they a
 problem.
 
 It runs three passes: fill voxels that look like holes in an existing surface, regularize the
-surface with a 3x3x3 majority filter, then drop islands smaller than one 4x4x4 block.
+surface with a 3x3x3 majority filter, then drop islands smaller than one 4x4x4 block. The
+smoothing pass keeps any voxel with at least three occupied face neighbours, so a 1-voxel-thick
+roof deck or wall survives it — a pure density test would delete thin surfaces rather than
+smooth them, since they can never reach the threshold — while single-voxel bumps, scatter and
+thin poles are still shaved off.
 
 Crucially, **every voxel it adds must have gaussian density behind it.** The cleanup samples the
 same field a second time at a far lower opacity threshold and uses that as a mask, so a real
@@ -305,14 +309,21 @@ density and is untouchable at any scale. Morphological closing on its own would 
 scene below, an ungated close at the same radius placed ~140,000 voxels in effective vacuum, 46%
 of everything it added. The gated pipeline places none.
 
-On a 24x21x38 m city rooftop capture at 10 cm:
+On a city rooftop capture cropped to a 40 m box at 10 cm (52x35x50 m of occupied grid after
+auto-rotate):
 
 | | occupied voxels | disconnected islands | in the largest | surface roughness |
 | --- | --- | --- | --- | --- |
-| without | 288,184 | 13,602 | 60.4% | 9.8 voxels |
-| `--voxel-cleanup 0.2` | 202,947 | 64 | 77.6% | 3.3 voxels |
+| without | 324,997 | 11,349 | 67.8% | 2.35 voxels |
+| `--voxel-cleanup 0.2` | 328,717 | 112 | 84.0% | 1.43 voxels |
 
-Note the voxel count goes *down*: it is removing noise, not adding bulk.
+Note the voxel count barely moves — +1.1% here: hole filling and scatter removal roughly cancel, so
+cleanup redistributes voxels onto surfaces rather than adding bulk, and every addition is
+density-gated (41.9K were blocked on this scene for having none behind them).
+
+Measured with `tools/voxel-metrics.mjs`, which defines roughness as the mean deviation of each
+column's topmost voxel from its neighbours' — compare the rows against each other rather than
+against figures from elsewhere.
 
 ```bash
 splat-transform city.spz city.voxel.json --voxel-params 0.1,0.1 --voxel-cleanup 0.2
